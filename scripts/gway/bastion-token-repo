@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+checker="${BASTION_KEY_PRESENT:-/usr/local/libexec/bastion-key-present}"
+repo_rel="${BASTION_TOKEN_REPO_REL:-api-tokens}"
+
+usage() {
+  cat <<'EOF'
+Usage:
+  bastion-token-repo path
+  bastion-token-repo init
+  bastion-token-repo status
+
+The repository lives on the verified bastion USB key. Keep API token files
+there, not on local disk.
+EOF
+}
+
+repo_path() {
+  local dir
+  dir="$("$checker" --dir)" || return 1
+  printf '%s/%s\n' "$dir" "$repo_rel"
+}
+
+mount_target_for_path() {
+  findmnt -rn --target "$1" -o TARGET 2>/dev/null | head -n 1
+}
+
+mount_is_ro() {
+  findmnt -rn --target "$1" -o OPTIONS 2>/dev/null | grep -Eq '(^|,)ro(,|$)'
+}
+
+remount() {
+  local mode="$1"
+  local target="$2"
+
+  if [[ "$(id -u)" -eq 0 ]]; then
+    mount -o "remount,$mode" "$target"
+  else
+    sudo -n mount -o "remount,$mode" "$target"
+  fi
+}
+
+require_key() {
+  if [[ ! -x "$checker" ]] || ! "$checker" --quiet; then
+    printf 'API token repo access requires the verified bastion USB key.\n' >&2
+    exit 75
+  fi
+}
+
+case "${1:-}" in
+  path)
+    require_key
+    repo_path
+    ;;
+  init)
+    require_key
+    path="$(repo_path)"
+    parent="$(dirname "$path")"
+    mount_target="$(mount_target_for_path "$parent")"
+    remounted_rw=0
+    if [[ -n "$mount_target" ]] && mount_is_ro "$parent"; then
+      remount rw "$mount_target"
+      remounted_rw=1
+    fi
+    cleanup_mount() {
+      if [[ "$remounted_rw" -eq 1 ]]; then
+        sync -f "$path" 2>/dev/null || sync
+        remount ro "$mount_target" || true
+      fi
+    }
+    trap cleanup_mount EXIT INT TERM
+    mkdir -p "$path/tokens" "$path/notes"
+    if [[ ! -d "$path/.git" ]]; then
+      git init -b main "$path" >/dev/null 2>&1 || git init "$path" >/dev/null
+    fi
+    git -C "$path" config core.filemode false
+    if git -C "$path" rev-parse --verify master >/dev/null 2>&1 && ! git -C "$path" rev-parse --verify main >/dev/null 2>&1; then
+      git -C "$path" branch -m master main
+    fi
+    printf 'Bastion API Token Repository\n\nKeep API tokens and token notes here on the verified bastion USB key. Do not copy token files to local disk.\n\nSuggested layout:\n- tokens/<service>.env for service-specific token exports\n- notes/<service>.md for rotation notes and scope notes\n\nUse one token per line as NAME=value, with no shell history paste of secret values when avoidable.\n' >"$path/README.md"
+    printf '*.tmp\n*.bak\n*.swp\n.decrypted/\n' >"$path/.gitignore"
+    touch "$path/tokens/.gitkeep" "$path/notes/.gitkeep"
+    if ! git -C "$path" rev-parse --verify HEAD >/dev/null 2>&1; then
+      git -C "$path" add README.md .gitignore tokens/.gitkeep notes/.gitkeep
+      git -C "$path" commit -m "Initialize bastion API token repository" >/dev/null
+    fi
+    printf '%s\n' "$path"
+    cleanup_mount
+    trap - EXIT INT TERM
+    ;;
+  status)
+    require_key
+    path="$(repo_path)"
+    if [[ ! -d "$path/.git" ]]; then
+      printf 'not initialized: %s\n' "$path"
+      exit 1
+    fi
+    git -C "$path" status --short
+    ;;
+  help|-h|--help)
+    usage
+    ;;
+  *)
+    usage >&2
+    exit 64
+    ;;
+esac

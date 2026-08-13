@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly TARGET_MOUNT="/mnt/bastion-unlock"
+readonly PROBE_MOUNT="/mnt/bastion-unlock.probe"
+readonly MOUNT_OPTS="ro,noatime,nosuid,nodev,noexec,uid=1000,gid=1000,fmask=0177,dmask=0077"
+readonly HOLD_FILE="/run/bastion-ssh/refresh.disabled"
+
+current_user() {
+    id -un 1000 2>/dev/null || id -un
+}
+
+cleanup() {
+    if findmnt -rn "$PROBE_MOUNT" >/dev/null 2>&1; then
+        umount "$PROBE_MOUNT"
+    fi
+}
+
+trap cleanup EXIT INT TERM
+
+claimed_bastion_partitions() {
+    if command -v arthexis-usb-inventory >/dev/null 2>&1; then
+        arthexis-usb-inventory claimed-path --role bastion-unlock --refresh 2>/dev/null | while read -r dev; do
+            [[ -b "$dev" ]] && printf '%s\n' "$dev"
+        done
+    fi
+}
+
+usb_partitions() {
+    local claimed
+    claimed="$(claimed_bastion_partitions || true)"
+    if [[ -n "$claimed" ]]; then
+        printf '%s\n' "$claimed"
+        return
+    fi
+
+    while read -r disk; do
+        lsblk -pnro PATH,TYPE "$disk" | awk '$2=="part" { print $1 }'
+    done < <(lsblk -pnro PATH,TYPE,TRAN | awk '$2=="disk" && $3=="usb" { print $1 }')
+}
+
+partition_disk() {
+    local dev="$1"
+    local pkname
+
+    pkname="$(lsblk -no PKNAME "$dev" 2>/dev/null | head -n 1)"
+    [[ -n "$pkname" ]] || return 1
+    printf '/dev/%s\n' "$pkname"
+}
+
+is_known_sd_burner_partition() {
+    local dev="$1"
+    local disk identity
+
+    disk="$(partition_disk "$dev" || true)"
+    [[ -n "$disk" ]] || return 1
+    identity="$(udevadm info --query=property --name="$disk" 2>/dev/null | awk -F= '
+        $1 == "ID_VENDOR" || $1 == "ID_MODEL" || $1 == "ID_SERIAL_SHORT" { print tolower($2) }
+    ' | paste -sd ' ' -)"
+    [[ "$identity" == *"fnk_tech"* && "$identity" == *"usb_card_reader"* ]]
+}
+
+mount_opts_for_fstype() {
+    local fstype="$1"
+
+    case "$fstype" in
+        vfat|msdos|exfat)
+            printf '%s\n' "$MOUNT_OPTS"
+            ;;
+        *)
+            printf '%s\n' "ro,noatime,nosuid,nodev,noexec"
+            ;;
+    esac
+}
+
+mkdir -p "$TARGET_MOUNT" "$PROBE_MOUNT"
+
+if [[ -e "$HOLD_FILE" ]]; then
+    echo "Bastion USB refresh is held." >&2
+    exit 1
+fi
+
+if findmnt -rn "$TARGET_MOUNT" >/dev/null 2>&1; then
+    if [[ -f "$TARGET_MOUNT/bastion/unlock.pass" ]]; then
+        printf '%s\n' "$TARGET_MOUNT/bastion"
+        exit 0
+    fi
+    if [[ -f "$TARGET_MOUNT/bastion-ssh/unlock.pass" ]]; then
+        printf '%s\n' "$TARGET_MOUNT/bastion-ssh"
+        exit 0
+    fi
+    umount "$TARGET_MOUNT"
+fi
+
+while read -r dev fstype; do
+    if [[ -z "$dev" ]]; then
+        continue
+    fi
+
+    if findmnt -rn -S "$dev" >/dev/null 2>&1; then
+        continue
+    fi
+
+    if is_known_sd_burner_partition "$dev"; then
+        continue
+    fi
+
+    mount -t "${fstype:-auto}" -o "$(mount_opts_for_fstype "$fstype")" "$dev" "$PROBE_MOUNT"
+
+    if [[ -f "$PROBE_MOUNT/bastion/unlock.pass" ]]; then
+        umount "$PROBE_MOUNT"
+        mount -t "${fstype:-auto}" -o "$(mount_opts_for_fstype "$fstype")" "$dev" "$TARGET_MOUNT"
+        printf '%s\n' "$TARGET_MOUNT/bastion"
+        exit 0
+    fi
+
+    if [[ -f "$PROBE_MOUNT/bastion-ssh/unlock.pass" ]]; then
+        umount "$PROBE_MOUNT"
+        mount -t "${fstype:-auto}" -o "$(mount_opts_for_fstype "$fstype")" "$dev" "$TARGET_MOUNT"
+        printf '%s\n' "$TARGET_MOUNT/bastion-ssh"
+        exit 0
+    fi
+
+    umount "$PROBE_MOUNT"
+done < <(
+    while read -r dev; do
+        [[ -n "$dev" ]] || continue
+        fstype="$(lsblk -pnro FSTYPE "$dev" | head -n 1)"
+        printf '%s %s\n' "$dev" "$fstype"
+    done < <(usb_partitions)
+)
+
+while read -r mounted_dir; do
+    [[ -n "$mounted_dir" ]] || continue
+    if [[ -f "$mounted_dir/unlock.pass" ]]; then
+        printf '%s\n' "$mounted_dir"
+        exit 0
+    fi
+done < <(find "/media/$(current_user)" "/run/media/$(current_user)" -mindepth 2 -maxdepth 2 -type d \( -name bastion -o -name bastion-ssh \) 2>/dev/null || true)
+
+echo "No bastion unlock USB found." >&2
+exit 1

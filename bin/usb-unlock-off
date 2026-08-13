@@ -1,0 +1,8 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly TARGET_MOUNT="/mnt/bastion-unlock"
+
+if findmnt -rn "$TARGET_MOUNT" >/dev/null 2>&1; then
+    umount "$TARGET_MOUNT"
+fi

@@ -1,0 +1,11 @@
+[Unit]
+Description=Periodic Bastion USB Unlock Refresh
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=10min
+RandomizedDelaySec=60s
+Unit=bastion-usb-refresh.service
+
+[Install]
+WantedBy=timers.target

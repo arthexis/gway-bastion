@@ -1,0 +1,60 @@
+.TH USB-GIT 1 "July 2026" "gway-001" "User Commands"
+.SH NAME
+usb-git \- bastion-gated GitHub CLI wrapper for gway-001
+.SH SYNOPSIS
+.B usb-git
+[\fB--workgroup\fR \fINAME\fR] \fIgh-arguments\fR...
+.br
+.B usb-git
+\fBbootstrap\fR [\fB--token-file\fR \fIPATH\fR | \fB--from-gh-auth\fR]
+.br
+.B usb-git
+\fBinstall-hooks\fR [\fIREPO\fR...]
+.SH DESCRIPTION
+.B usb-git
+wraps the GitHub CLI on gway-001. Normal read-only GitHub operations pass
+through to
+.BR gh .
+Privileged operations such as repository administration, pull-request merges,
+release writes, secrets, variables, mutating
+.B gh api
+calls, and protected direct git pushes require the verified bastion USB key.
+.P
+The wrapper logs start and finish events to the local workgroup interaction log
+and installs pre-push hooks that protect main, tags, deleted refs, and
+non-fast-forward updates.
+.SH COMMANDS
+.TP
+.B bootstrap
+Encrypt a GitHub admin token for bastion-gated use and install the main push
+guard hooks in the default local Arthexis checkouts.
+.TP
+.B bootstrap --from-gh-auth
+Use the currently authenticated GitHub CLI token as the token source.
+.TP
+.B bootstrap --token-file PATH
+Use a token read from
+.IR PATH .
+The token is encrypted locally; it is not printed.
+.TP
+.B install-hooks
+Install the pre-push guard in the supplied repositories. With no repositories,
+the default local Arthexis checkouts are used.
+.SH FILES
+.TP
+.I ~/.config/usb-git/admin-token.enc
+Bastion-key-encrypted admin token.
+.TP
+.I ~/.config/usb-git/main-guard.marker.enc
+Bastion-key-encrypted marker used by the git push guard.
+.TP
+.I ~/.local/lib/usb-git/pre-push-main-guard.sh
+Protected push hook target.
+.TP
+.I ~/logs/usb-interactions.log
+Local interaction log.
+.SH SAFETY
+.B usb-git
+does not gate ordinary local repository inspection or read-only GitHub queries.
+It gates publication and destructive repository actions behind the verified
+bastion USB key.

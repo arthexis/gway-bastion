@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh Bastion USB Unlock State
+Wants=bastion-ssh-agent.service
+After=bastion-ssh-agent.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/bastion-usb-refresh
+
+[Install]
+WantedBy=multi-user.target

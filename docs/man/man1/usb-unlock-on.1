@@ -1,0 +1,36 @@
+.TH USB-UNLOCK-ON 1 "July 2026" "gway-001" "User Commands"
+.SH NAME
+usb-unlock-on \- mount the verified bastion unlock USB read-only
+.SH SYNOPSIS
+.B usb-unlock-on
+.SH DESCRIPTION
+.B usb-unlock-on
+searches USB block partitions for a bastion unlock layout containing
+.I bastion/unlock.pass
+or
+.IR bastion-ssh/unlock.pass .
+When found, it mounts that partition read-only at
+.I /mnt/bastion-unlock
+and prints the directory containing
+.IR unlock.pass .
+.P
+Already-mounted non-target USB partitions are skipped during probing so
+unrelated removable media is not unmounted. If a desktop automounter already
+mounted a bastion directory under
+.I /media
+or
+.IR /run/media ,
+the existing mount can be used.
+.SH FILES
+.TP
+.I /mnt/bastion-unlock
+Read-only bastion unlock mount point.
+.TP
+.I /mnt/bastion-unlock.probe
+Temporary probe mount point.
+.TP
+.I /run/bastion-ssh/refresh.disabled
+Hold file that disables refresh while sensitive USB operations are in progress.
+.SH SAFETY
+The mounted bastion key is read-only, nosuid, nodev, and noexec. The command
+does not print the unlock password.

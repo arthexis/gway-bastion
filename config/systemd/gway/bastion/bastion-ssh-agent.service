@@ -1,0 +1,16 @@
+[Unit]
+Description=Bastion SSH Agent
+After=local-fs.target
+
+[Service]
+Type=simple
+User=arthe
+Group=arthe
+RuntimeDirectory=bastion-ssh
+RuntimeDirectoryMode=0755
+ExecStart=/usr/bin/ssh-agent -D -a /run/bastion-ssh/agent.sock
+Restart=always
+RestartSec=1
+
+[Install]
+WantedBy=multi-user.target

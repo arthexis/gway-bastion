@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+printf '%s\n' \
+  "Remote bastion authorization is disabled. Insert the Bastion USB on 001 and use local unlock only." >&2
+exit 64

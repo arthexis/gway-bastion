@@ -1,0 +1,371 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+source /home/arthe/.local/lib/usb-git/common.sh
+source /home/arthe/.local/lib/workgroup-log.sh
+
+readonly REAL_GH="/usr/bin/gh"
+readonly HOOK_TARGET="/home/arthe/.local/lib/usb-git/pre-push-main-guard.sh"
+USB_GIT_ACTION="unknown"
+USB_GIT_DETAIL=""
+USB_GIT_LOGGED_FINISH=0
+
+usb_git_log_start() {
+    workgroup_log_event "usb-git" "start" "$USB_GIT_ACTION" "$USB_GIT_DETAIL"
+}
+
+usb_git_log_finish() {
+    local status="$1"
+
+    if [[ "$USB_GIT_LOGGED_FINISH" -eq 1 ]]; then
+        return 0
+    fi
+
+    workgroup_log_event "usb-git" "finish" "$USB_GIT_ACTION" "$USB_GIT_DETAIL" "$status"
+    USB_GIT_LOGGED_FINISH=1
+}
+
+usb_git_die() {
+    if [[ "${BASH_SUBSHELL:-0}" -gt 0 ]]; then
+        printf 'Error: %s\n' "$*" >&2
+        return 1
+    fi
+
+    usb_git_log_finish 1
+    printf 'Error: %s\n' "$*" >&2
+    exit 1
+}
+
+usb_git_gh_is_privileged() {
+    local -a args=("$@")
+    local command subcommand
+    local index=0
+    local expect_value=0
+    local arg
+
+    while [[ "$index" -lt "${#args[@]}" ]]; do
+        arg="${args[$index]}"
+        if [[ "$expect_value" -eq 1 ]]; then
+            expect_value=0
+            index=$((index + 1))
+            continue
+        fi
+
+        case "$arg" in
+            --)
+                index=$((index + 1))
+                break
+                ;;
+            -R|--repo|-H|--hostname|-q|--jq|-t|--template)
+                expect_value=1
+                index=$((index + 1))
+                continue
+                ;;
+            --repo=*|--hostname=*|--jq=*|--template=*|--paginate|--verbose)
+                index=$((index + 1))
+                continue
+                ;;
+            -*)
+                index=$((index + 1))
+                continue
+                ;;
+            *)
+                break
+                ;;
+        esac
+    done
+
+    command="${args[$index]:-}"
+    subcommand="${args[$((index + 1))]:-}"
+
+    case "$command:$subcommand" in
+        pr:merge)
+            return 0
+            ;;
+        repo:create|repo:delete|repo:archive|repo:rename|repo:transfer|repo:edit)
+            return 0
+            ;;
+        release:create|release:delete|release:delete-asset|release:edit|release:upload)
+            return 0
+            ;;
+        secret:set|secret:delete|variable:set|variable:delete)
+            return 0
+            ;;
+    esac
+
+    if [[ "$command" == "api" ]]; then
+        local expect_method=0
+        local method="GET"
+        local api_index
+
+        for ((api_index = index + 1; api_index < ${#args[@]}; api_index++)); do
+            arg="${args[$api_index]}"
+            if [[ "$expect_method" -eq 1 ]]; then
+                method="${arg^^}"
+                expect_method=0
+                continue
+            fi
+
+            case "$arg" in
+                -X|--method)
+                    expect_method=1
+                    ;;
+                -f|--field|--raw-field|--input)
+                    method="POST"
+                    ;;
+            esac
+        done
+
+        case "$method" in
+            GET|HEAD)
+                return 1
+                ;;
+            *)
+                return 0
+                ;;
+        esac
+    fi
+
+    return 1
+}
+
+usb_git_install_hooks() {
+    local repo git_dir hook_path
+
+    if [[ "$#" -eq 0 ]]; then
+        set -- /home/arthe/arthexis /home/arthe/prototype /home/arthe/experiment
+    fi
+
+    for repo in "$@"; do
+        git_dir="$(git -C "$repo" rev-parse --git-dir)"
+        case "$git_dir" in
+            /*)
+                hook_path="$git_dir/hooks/pre-push"
+                ;;
+            *)
+                hook_path="$repo/$git_dir/hooks/pre-push"
+                ;;
+        esac
+
+        mkdir -p "$(dirname "$hook_path")"
+
+        if [[ -e "$hook_path" && ! -L "$hook_path" ]]; then
+            printf 'Skipping %s because %s already exists and is not a symlink.\n' "$repo" "$hook_path" >&2
+            return 1
+        fi
+
+        ln -sfn "$HOOK_TARGET" "$hook_path"
+        printf 'Installed main push guard in %s\n' "$repo"
+    done
+}
+
+usb_git_summarize_gh_action() {
+    local command="${1:-}"
+    local subcommand="${2:-}"
+
+    if [[ -n "$command" && -n "$subcommand" ]]; then
+        printf '%s\n' "$command:$subcommand"
+        return 0
+    fi
+
+    if [[ -n "$command" ]]; then
+        printf '%s\n' "$command"
+        return 0
+    fi
+
+    printf '%s\n' "help"
+}
+
+usb_git_bootstrap() {
+    local token_file="" from_gh_auth=0 token unlock_file tmp_token tmp_marker
+
+    usb_git_need_cmd openssl
+
+    while [[ "$#" -gt 0 ]]; do
+        case "$1" in
+            --token-file)
+                shift
+                [[ "$#" -gt 0 ]] || usb_git_die "--token-file requires a path"
+                token_file="$1"
+                ;;
+            --from-gh-auth)
+                from_gh_auth=1
+                ;;
+            *)
+                usb_git_die "Unknown bootstrap argument: $1"
+                ;;
+        esac
+        shift
+    done
+
+    umask 077
+    mkdir -p "$USB_GIT_CONFIG_DIR"
+
+    if [[ -n "$token_file" && "$from_gh_auth" -eq 1 ]]; then
+        usb_git_die "Use either --token-file or --from-gh-auth, not both"
+    fi
+
+    if [[ -n "$token_file" ]]; then
+        [[ -f "$token_file" ]] || usb_git_die "Token file not found: $token_file"
+        token="$(tr -d '\r\n' <"$token_file")"
+    elif [[ "$from_gh_auth" -eq 1 ]]; then
+        token="$("$REAL_GH" auth token)"
+    else
+        token="$(usb_git_extract_git_token)" || usb_git_die "No GitHub token was found in $USB_GIT_GIT_CREDENTIALS"
+    fi
+
+    [[ -n "$token" ]] || usb_git_die "The selected token source was empty"
+    unlock_file="$(usb_git_unlock_file)" || usb_git_die "Insert the USB key containing bastion/unlock.pass and retry."
+
+    tmp_token="$(usb_git_with_temp_file)"
+    tmp_marker="$(usb_git_with_temp_file)"
+    trap 'rm -f "${tmp_token:-}" "${tmp_marker:-}"' EXIT
+
+    printf '%s' "$token" >"$tmp_token"
+    printf '%s' "$USB_GIT_MAIN_MARKER_TEXT" >"$tmp_marker"
+
+    openssl enc -aes-256-cbc -pbkdf2 -salt \
+        -in "$tmp_token" \
+        -out "$USB_GIT_ADMIN_TOKEN_ENC" \
+        -pass file:"$unlock_file"
+
+    openssl enc -aes-256-cbc -pbkdf2 -salt \
+        -in "$tmp_marker" \
+        -out "$USB_GIT_MAIN_MARKER_ENC" \
+        -pass file:"$unlock_file"
+
+    chmod 600 "$USB_GIT_ADMIN_TOKEN_ENC" "$USB_GIT_MAIN_MARKER_ENC"
+    usb_git_install_hooks
+    printf '%s\n' "Bootstrapped usb-git admin token and main push guard."
+}
+
+usb_git_run_gh() {
+    local admin_token tmp_stdout tmp_stderr stderr_text status normal_token
+
+    if [[ "${1:-}" == "auth" ]] && usb_git_is_auth_passthrough "${2:-}"; then
+        "$REAL_GH" "$@"
+        return $?
+    fi
+
+    if usb_git_gh_is_privileged "${1:-}" "${2:-}" "${@:3}"; then
+        if ! usb_git_require_bastion; then
+            printf '%s\n' "This GitHub action requires the verified bastion USB key." >&2
+            printf '%s\n' "Insert the key containing bastion/unlock.pass and retry." >&2
+            return 75
+        fi
+        if ! admin_token="$(usb_git_read_secret "$USB_GIT_ADMIN_TOKEN_ENC")"; then
+            return 1
+        fi
+        GH_TOKEN="$admin_token" GITHUB_TOKEN="$admin_token" "$REAL_GH" "$@"
+        return $?
+    fi
+
+    if [[ -n "${GH_TOKEN:-}" || -n "${GITHUB_TOKEN:-}" ]]; then
+        "$REAL_GH" "$@"
+        return $?
+    fi
+
+    tmp_stdout="$(mktemp "${TMPDIR:-/tmp}/usb-git.stdout.XXXXXX")"
+    tmp_stderr="$(mktemp "${TMPDIR:-/tmp}/usb-git.stderr.XXXXXX")"
+
+    if "$REAL_GH" "$@" >"$tmp_stdout" 2>"$tmp_stderr"; then
+        cat "$tmp_stdout"
+        rm -f "$tmp_stdout" "$tmp_stderr"
+        return 0
+    else
+        status=$?
+    fi
+
+    stderr_text="$(cat "$tmp_stderr")"
+    if printf '%s' "$stderr_text" | grep -qiE 'authentication failed|try authenticating|not logged into|token'; then
+        if normal_token="$(usb_git_extract_git_token 2>/dev/null)"; then
+            GH_TOKEN="$normal_token" GITHUB_TOKEN="$normal_token" "$REAL_GH" "$@"
+            status=$?
+            rm -f "$tmp_stdout" "$tmp_stderr"
+            return "$status"
+        fi
+    fi
+
+    cat "$tmp_stdout"
+    cat "$tmp_stderr" >&2
+    rm -f "$tmp_stdout" "$tmp_stderr"
+    return "$status"
+}
+
+usb_git_help() {
+    cat <<'EOF'
+usb-git mirrors usb-ssh for GitHub operations.
+
+Usage:
+  usb-git --workgroup NAME <gh arguments>
+  usb-git bootstrap [--token-file PATH | --from-gh-auth]
+  usb-git install-hooks [repo ...]
+  usb-git <gh arguments>
+
+Behavior:
+  - Normal GitHub CLI reads can run without the USB key.
+  - PR merges, repo admin changes, releases, secrets/variables, and mutating gh api calls require the USB key.
+  - Direct git pushes to main, tags, deleted refs, and non-fast-forward updates require the USB key.
+  - Set WORKGROUP_NAME or pass --workgroup NAME to stamp the interaction log at /home/arthe/logs/usb-interactions.log.
+  - Direct git pushes read WORKGROUP_NAME from the environment because git itself does not route through usb-git.
+EOF
+}
+
+if [[ "${1:-}" == "--workgroup" ]]; then
+    shift
+    [[ $# -gt 0 ]] || usb_git_die "--workgroup requires a value"
+    export WORKGROUP_NAME="$1"
+    shift
+fi
+
+case "${1:-}" in
+    bootstrap)
+        USB_GIT_ACTION="bootstrap"
+        USB_GIT_DETAIL="bootstrap"
+        shift
+        if [[ "${1:-}" == "--token-file" ]]; then
+            USB_GIT_DETAIL="bootstrap:token-file"
+        elif [[ "${1:-}" == "--from-gh-auth" ]]; then
+            USB_GIT_DETAIL="bootstrap:gh-auth"
+        else
+            USB_GIT_DETAIL="bootstrap:git-credentials"
+        fi
+        usb_git_log_start
+        if usb_git_bootstrap "$@"; then
+            status=0
+        else
+            status=$?
+        fi
+        ;;
+    install-hooks)
+        USB_GIT_ACTION="install-hooks"
+        shift
+        USB_GIT_DETAIL="repos:${#@}"
+        usb_git_log_start
+        if usb_git_install_hooks "$@"; then
+            status=0
+        else
+            status=$?
+        fi
+        ;;
+    help|-h|--help)
+        USB_GIT_ACTION="help"
+        USB_GIT_DETAIL="usage"
+        usb_git_log_start
+        usb_git_help
+        status=0
+        ;;
+    *)
+        USB_GIT_ACTION="gh"
+        USB_GIT_DETAIL="$(usb_git_summarize_gh_action "$@")"
+        usb_git_log_start
+        if usb_git_run_gh "$@"; then
+            status=0
+        else
+            status=$?
+        fi
+        ;;
+esac
+
+usb_git_log_finish "${status:-0}"
+exit "${status:-0}"

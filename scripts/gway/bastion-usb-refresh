@@ -1,0 +1,108 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly USER_NAME="arthe"
+readonly ENC_KEY="/home/arthe/.ssh/jump-outbound.enc"
+readonly MOUNT_HELPER="/usr/local/bin/usb-unlock-on"
+readonly UNMOUNT_HELPER="/usr/local/bin/usb-unlock-off"
+readonly AGENT_SOCK="/run/bastion-ssh/agent.sock"
+readonly RUNDIR="/run/bastion-ssh"
+readonly HOLD_FILE="/run/bastion-ssh/refresh.disabled"
+readonly LOCKFILE="/run/lock/bastion-usb-refresh.lock"
+readonly ADMIN_EMAIL_SYNC="/home/arthe/.local/bin/gway-admin-email-sync"
+
+mkdir -p "$RUNDIR" "$(dirname "$LOCKFILE")"
+exec 9>"$LOCKFILE"
+flock 9
+
+if [[ -e "$HOLD_FILE" ]]; then
+    exit 0
+fi
+
+clear_agent() {
+    if [[ -S "$AGENT_SOCK" ]]; then
+        runuser -u "$USER_NAME" -- env SSH_AUTH_SOCK="$AGENT_SOCK" ssh-add -D >/dev/null 2>&1 || true
+    fi
+}
+
+wait_for_agent() {
+    local i
+    for i in $(seq 1 20); do
+        if [[ -S "$AGENT_SOCK" ]]; then
+            return 0
+        fi
+        sleep 0.1
+    done
+    return 1
+}
+
+cleanup_usb_layout() {
+    local bastion_dir="$1"
+    local usb_root
+    local remounted_rw=0
+
+    usb_root="$(dirname "$bastion_dir")"
+    if [[ ! -d "$usb_root" ]]; then
+        return 0
+    fi
+
+    if findmnt -rn -o OPTIONS --target "$usb_root" | grep -Eq '(^|,)ro(,|$)'; then
+        mount -o remount,rw "$usb_root"
+        remounted_rw=1
+    fi
+
+    rm -rf "$usb_root/gway-tools" "$usb_root/TerminalCity"
+    cat >"$usb_root/README.txt" <<'EOF'
+GWAY bastion USB key
+
+This key is for unlocking 001 locally when physically inserted into 001.
+
+Use payload/ only for non-secret file transfer. Do not run tools from this key
+on laptops or other systems, and do not copy or print bastion/unlock.pass.
+EOF
+    mkdir -p "$usb_root/payload"
+    if [[ ! -e "$usb_root/payload/README.txt" ]]; then
+        cat >"$usb_root/payload/README.txt" <<'EOF'
+GWAY USB payload area
+
+Use this folder for non-secret files copied off 001 or another computer where
+this key is connected. Do not put unlock secrets, tokens, private keys, or
+plaintext credentials here.
+EOF
+    fi
+    sync -f "$usb_root" 2>/dev/null || sync
+
+    if [[ "$remounted_rw" -eq 1 ]]; then
+        mount -o remount,ro "$usb_root" || true
+    fi
+}
+
+usb_dir="$($MOUNT_HELPER 2>/dev/null || true)"
+
+if [[ -n "$usb_dir" && -f "$usb_dir/unlock.pass" ]]; then
+    cleanup_usb_layout "$usb_dir"
+
+    if [[ -x "$ADMIN_EMAIL_SYNC" && -f "$usb_dir/email/admin-email.toml" ]]; then
+        "$ADMIN_EMAIL_SYNC" --apply --quiet || true
+    fi
+
+    tmpkey="$(mktemp "$RUNDIR/jump-outbound.XXXXXX")"
+
+    cleanup() {
+        rm -f "$tmpkey"
+    }
+
+    trap cleanup EXIT INT TERM
+
+    openssl enc -d -aes-256-cbc -pbkdf2 -in "$ENC_KEY" -out "$tmpkey" -pass file:"$usb_dir/unlock.pass"
+    chown "$USER_NAME:$USER_NAME" "$tmpkey"
+    chmod 600 "$tmpkey"
+
+    clear_agent
+    wait_for_agent
+    runuser -u "$USER_NAME" -- env SSH_AUTH_SOCK="$AGENT_SOCK" ssh-add -q "$tmpkey"
+    exit 0
+fi
+
+clear_agent
+"$UNMOUNT_HELPER" >/dev/null 2>&1 || true

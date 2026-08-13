@@ -1,0 +1,126 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+OWNER_HOME="${BASTION_OWNER_HOME:-/home/arthe}"
+ENC_KEY="${BASTION_ENC_KEY:-$OWNER_HOME/.ssh/jump-outbound.enc}"
+PUB_KEY="${BASTION_PUB_KEY:-$OWNER_HOME/.ssh/jump-outbound.pub}"
+UNLOCK_HELPER="${BASTION_UNLOCK_HELPER:-/usr/local/bin/usb-unlock-on}"
+FIXED_DIR="${BASTION_FIXED_DIR:-/mnt/bastion-unlock/bastion}"
+LEGACY_FIXED_DIR="${BASTION_LEGACY_FIXED_DIR:-/mnt/bastion-unlock/bastion-ssh}"
+
+mode="quiet"
+case "${1:-}" in
+  --dir)
+    mode="dir"
+    ;;
+  --unlock-file)
+    mode="unlock_file"
+    ;;
+  --status)
+    mode="status"
+    ;;
+  ""|--quiet)
+    mode="quiet"
+    ;;
+  *)
+    printf 'usage: bastion-key-present [--quiet|--status|--dir|--unlock-file]\n' >&2
+    exit 64
+    ;;
+esac
+
+fail() {
+  if [[ "$mode" == "status" ]]; then
+    printf 'absent\n'
+  fi
+  exit 1
+}
+
+run_unlock_helper() {
+  if [[ ! -x "$UNLOCK_HELPER" ]]; then
+    return 1
+  fi
+  if [[ "$(id -u)" -eq 0 ]]; then
+    "$UNLOCK_HELPER" 2>/dev/null
+  elif command -v sudo >/dev/null 2>&1; then
+    sudo -n "$UNLOCK_HELPER" 2>/dev/null
+  else
+    "$UNLOCK_HELPER" 2>/dev/null
+  fi
+}
+
+mounted_usb_source_for_dir() {
+  local dir="$1"
+  local source partition disk tran
+
+  source="$(findmnt -rn --target "$dir" -o SOURCE 2>/dev/null | head -n 1 || true)"
+  [[ "$source" == /dev/* ]] || return 1
+
+  partition="$source"
+  disk="$(lsblk -no PKNAME "$partition" 2>/dev/null | head -n 1 || true)"
+  if [[ -n "$disk" ]]; then
+    disk="/dev/$disk"
+  else
+    disk="$partition"
+  fi
+  tran="$(lsblk -ndo TRAN "$disk" 2>/dev/null | tr -d '[:space:]' || true)"
+  [[ "$tran" == "usb" ]] || return 1
+  printf '%s\n' "$source"
+}
+
+candidate_dir() {
+  local dir
+
+  dir="$(run_unlock_helper || true)"
+  if [[ -n "$dir" && -f "$dir/unlock.pass" ]]; then
+    printf '%s\n' "$dir"
+    return 0
+  fi
+
+  for dir in "$FIXED_DIR" "$LEGACY_FIXED_DIR"; do
+    if [[ -f "$dir/unlock.pass" ]]; then
+      printf '%s\n' "$dir"
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+verify_key() {
+  local dir="$1"
+  local tmpkey tmppub
+
+  [[ -r "$ENC_KEY" && -r "$PUB_KEY" && -r "$dir/unlock.pass" ]] || return 1
+  mounted_usb_source_for_dir "$dir" >/dev/null || return 1
+
+  tmpkey="$(mktemp "${TMPDIR:-/tmp}/bastion-key.XXXXXX")"
+  tmppub="$(mktemp "${TMPDIR:-/tmp}/bastion-pub.XXXXXX")"
+  chmod 600 "$tmpkey" "$tmppub"
+  cleanup() {
+    rm -f "$tmpkey" "$tmppub"
+  }
+  trap cleanup RETURN
+
+  openssl enc -d -aes-256-cbc -pbkdf2 \
+    -in "$ENC_KEY" \
+    -out "$tmpkey" \
+    -pass "file:$dir/unlock.pass" >/dev/null 2>&1 || return 1
+  ssh-keygen -y -f "$tmpkey" >"$tmppub" 2>/dev/null || return 1
+  cmp -s "$tmppub" "$PUB_KEY"
+}
+
+dir="$(candidate_dir || true)"
+[[ -n "$dir" ]] || fail
+verify_key "$dir" || fail
+
+case "$mode" in
+  dir)
+    printf '%s\n' "$dir"
+    ;;
+  unlock_file)
+    printf '%s\n' "$dir/unlock.pass"
+    ;;
+  status)
+    printf 'present\n'
+    ;;
+esac
