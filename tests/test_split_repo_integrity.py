@@ -18,6 +18,7 @@ def test_bash_helpers_parse():
         ROOT / "scripts/gway/usb-git/usb-git",
         ROOT / "bin/gh",
         ROOT / "bin/usb-git",
+        ROOT / "bin/usb-ssh",
         ROOT / "bin/usb-unlock-on",
         ROOT / "bin/usb-unlock-off",
         ROOT / "lib/usb-git/common.sh",

@@ -1,108 +1,53 @@
-# GWAY USB Inventory And Bastion Unlock
+# GWAY Bastion Unlock
 
-GWAY uses two host-local USB helpers during rebuild and operation:
+GWAY uses host-local bastion helpers during rebuild and operation:
 
-- `arthexis-usb-inventory` records local USB block devices and applies local
-  claim rules such as `bastion-unlock` and `kindle-postbox`.
 - `usb-unlock-on` mounts the bastion unlock USB read-only at
   `/mnt/bastion-unlock` when a valid bastion marker directory is found.
+- `bastion-key-present` verifies the mounted key by decrypting the local
+  encrypted SSH key and comparing the derived public key.
+- `usb-git` and the guarded `gh` wrapper require the verified key for
+  destructive GitHub and protected-branch operations.
 
-The inventory state is operational state. USB claim files can identify private
-hardware. Store public examples in the repository, but keep filled claim files
-local or bastion-held.
+USB inventory and claim matching live in `/home/arthe/gway-field-usb`.
 
 ## Repository Files
 
 | Source path | Install target |
 | --- | --- |
-| `scripts/gway/arthexis_usb_inventory.py` | `/usr/local/bin/arthexis-usb-inventory` |
-| `scripts/gway/usb-unlock-on` | `/usr/local/bin/usb-unlock-on` |
-| `scripts/gway/usb-unlock-off` | `/usr/local/bin/usb-unlock-off` |
-| `config/templates/arthexis-usb-claims.json.template` | `/etc/arthexis-usb/claims.json` after local edit |
-| `config/systemd/gway/usb-inventory/arthexis-usb-inventory.service` | `/etc/systemd/system/arthexis-usb-inventory.service` |
-| `config/systemd/gway/usb-inventory/arthexis-usb-inventory.timer` | `/etc/systemd/system/arthexis-usb-inventory.timer` |
-| `config/systemd/gway/usb-inventory/arthexis-usb-inventory.service.d/10-runtime-directory.conf` | `/etc/systemd/system/arthexis-usb-inventory.service.d/10-runtime-directory.conf` |
-
-## Drift Resolution
-
-The 2026-07-28 rebuild inventory found that the staged USB folder was not fully
-authoritative:
-
-- `/usr/local/bin/arthexis-usb-inventory` matched
-  `/home/arthe/usb-hub/bin/arthexis-usb-inventory`.
-- `/usr/local/bin/usb-unlock-on` differed from
-  `/home/arthe/usb-hub/bin/usb-unlock-on`.
-- `/etc/systemd/system/arthexis-usb-inventory.service` differed from the staged
-  service because the installed service runs as the `arthe` user.
-- `/etc/systemd/system/arthexis-usb-inventory.timer` differed from the staged
-  timer because the installed timer uses the slower Control-node cadence.
-
-For rebuild purposes, the repository now follows the installed behavior for the
-drifted files.
-
-## Claims Template
-
-Install the template, then replace example match selectors with values for the
-local devices:
-
-```bash
-sudo install -d -m 0755 /etc/arthexis-usb
-sudo install -m 0644 config/templates/arthexis-usb-claims.json.template \
-  /etc/arthexis-usb/claims.json
-sudo editor /etc/arthexis-usb/claims.json
-```
-
-Claim match keys are compared against inventory fields such as:
-
-- `path_type`
-- `fstype`
-- `label`
-- `fs_uuid`
-- `vendor`
-- `model`
-- `serial`
-- `kindle_shape`
-
-Prefer non-secret selectors such as filesystem label and `kindle_shape` when
-they are stable enough. Use serial or filesystem UUID selectors only when the
-claim must bind to one physical device, and do not commit filled values.
+| `bin/usb-unlock-on` | `/usr/local/bin/usb-unlock-on` |
+| `bin/usb-unlock-off` | `/usr/local/bin/usb-unlock-off` |
+| `bin/usb-ssh` | `/home/arthe/.local/bin/usb-ssh` |
+| `scripts/gway/bastion-key-present` | `/usr/local/libexec/bastion-key-present` |
+| `scripts/gway/bastion-require` | `/usr/local/libexec/bastion-require` |
+| `scripts/gway/bastion-usb-refresh` | `/usr/local/bin/bastion-usb-refresh` |
+| `scripts/gway/usb-git/usb-git` | `/home/arthe/.local/bin/usb-git` |
+| `lib/usb-git/common.sh` | `/home/arthe/.local/lib/usb-git/common.sh` |
+| `lib/usb-git/pre-push-main-guard.sh` | `/home/arthe/.local/lib/usb-git/pre-push-main-guard.sh` |
 
 ## Install
 
 From the repository root:
 
 ```bash
-sudo install -d -m 0755 /usr/local/bin /etc/systemd/system \
-  /etc/systemd/system/arthexis-usb-inventory.service.d
-sudo install -m 0755 scripts/gway/arthexis_usb_inventory.py \
-  /usr/local/bin/arthexis-usb-inventory
-sudo install -m 0755 scripts/gway/usb-unlock-on /usr/local/bin/usb-unlock-on
-sudo install -m 0755 scripts/gway/usb-unlock-off /usr/local/bin/usb-unlock-off
-sudo install -m 0644 config/systemd/gway/usb-inventory/arthexis-usb-inventory.service \
-  /etc/systemd/system/arthexis-usb-inventory.service
-sudo install -m 0644 config/systemd/gway/usb-inventory/arthexis-usb-inventory.timer \
-  /etc/systemd/system/arthexis-usb-inventory.timer
-sudo install -m 0644 \
-  config/systemd/gway/usb-inventory/arthexis-usb-inventory.service.d/10-runtime-directory.conf \
-  /etc/systemd/system/arthexis-usb-inventory.service.d/10-runtime-directory.conf
+sudo install -d -m 0755 /usr/local/bin /usr/local/libexec /etc/systemd/system
+sudo install -m 0755 bin/usb-unlock-on /usr/local/bin/usb-unlock-on
+sudo install -m 0755 bin/usb-unlock-off /usr/local/bin/usb-unlock-off
+install -d -m 0755 "$HOME/.local/bin" "$HOME/.local/lib/usb-git"
+install -m 0755 bin/usb-ssh "$HOME/.local/bin/usb-ssh"
+install -m 0755 bin/usb-git "$HOME/.local/bin/usb-git"
+install -m 0755 lib/usb-git/common.sh "$HOME/.local/lib/usb-git/common.sh"
+install -m 0755 lib/usb-git/pre-push-main-guard.sh "$HOME/.local/lib/usb-git/pre-push-main-guard.sh"
+sudo install -m 0755 scripts/gway/bastion-key-present /usr/local/libexec/bastion-key-present
+sudo install -m 0755 scripts/gway/bastion-require /usr/local/libexec/bastion-require
+sudo install -m 0755 scripts/gway/bastion-usb-refresh /usr/local/bin/bastion-usb-refresh
 sudo systemctl daemon-reload
-sudo systemctl enable --now arthexis-usb-inventory.timer
 ```
 
 ## Validation
 
-Refresh inventory and list state:
-
-```bash
-sudo systemctl start arthexis-usb-inventory.service
-arthexis-usb-inventory list
-```
-
-Resolve the bastion claim:
-
-```bash
-arthexis-usb-inventory claimed-path --role bastion-unlock --refresh
-```
+Verify the inventory claim in `/home/arthe/gway-field-usb` first when the
+bastion helper should use a claimed partition.
 
 Mount and unmount bastion unlock storage:
 
@@ -123,20 +68,11 @@ Expected mount behavior:
 - It exits without changing state when `/run/bastion-ssh/refresh.disabled`
   exists.
 
-Check timer cadence:
-
-```bash
-systemctl status arthexis-usb-inventory.timer --no-pager
-systemctl list-timers arthexis-usb-inventory.timer --no-pager
-journalctl -u arthexis-usb-inventory.service -n 50 --no-pager
-```
-
 ## Safety Notes
 
-- Do not publish live inventory output when it contains private labels, serials,
-  filesystem UUIDs, or mount paths that identify private devices.
-- Do not commit a filled `/etc/arthexis-usb/claims.json`.
+- Do not publish live bastion mount output when it exposes private labels,
+  serials, filesystem UUIDs, or mount paths that identify private devices.
 - Do not let `usb-unlock-on` unmount arbitrary mounted USB partitions while SD
   burns, recordings, or file transfers are active.
-- Before removing a USB Wi-Fi dongle, validate the current AP/uplink roles with
-  `iw dev` and `nmcli -t -f DEVICE,TYPE,STATE,CONNECTION device status`.
+- Do not copy, print, or commit `unlock.pass`, private keys, encrypted token
+  blobs, or GitHub tokens.

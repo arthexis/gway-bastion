@@ -1,0 +1,936 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly SELF_NAME="$(basename "$0")"
+readonly OWNER_USER="arthe"
+readonly OWNER_HOME="/home/$OWNER_USER"
+readonly ENC_KEY="$OWNER_HOME/.ssh/jump-outbound.enc"
+readonly PUB_KEY="$OWNER_HOME/.ssh/jump-outbound.pub"
+readonly CONFIG_FILE="$OWNER_HOME/.ssh/config"
+readonly FIXED_USB_DIR="/mnt/bastion-unlock/bastion"
+readonly LEGACY_FIXED_USB_DIR="/mnt/bastion-unlock/bastion-ssh"
+readonly LOCAL_KNOWN_HOSTS="$OWNER_HOME/.ssh/usb-ssh-known_hosts"
+readonly AGENT_SOCK="/run/bastion-ssh/agent.sock"
+readonly UNLOCK_MOUNT="/mnt/bastion-unlock"
+readonly TARGET_MOUNT="/mnt/bastion-copy-target"
+readonly REFRESH_HOLD="/run/bastion-ssh/refresh.disabled"
+readonly AP_IP="10.42.0.1"
+readonly SSH_SESSION_SOUND_HOOK="/usr/local/libexec/gway-home-tools/ssh-session-sound"
+source /home/arthe/.local/lib/workgroup-log.sh
+
+USB_SSH_ACTION="unknown"
+USB_SSH_DETAIL=""
+USB_SSH_LOGGED_FINISH=0
+
+note() {
+    printf '%s\n' "$*"
+}
+
+usb_ssh_log_start() {
+    workgroup_log_event "$SELF_NAME" "start" "$USB_SSH_ACTION" "$USB_SSH_DETAIL"
+}
+
+usb_ssh_log_finish() {
+    local status="$1"
+
+    if [[ "$USB_SSH_LOGGED_FINISH" -eq 1 ]]; then
+        return 0
+    fi
+
+    workgroup_log_event "$SELF_NAME" "finish" "$USB_SSH_ACTION" "$USB_SSH_DETAIL" "$status"
+    USB_SSH_LOGGED_FINISH=1
+}
+
+die() {
+    usb_ssh_log_finish 1
+    printf 'Error: %s\n' "$*" >&2
+    exit 1
+}
+
+need_cmd() {
+    command -v "$1" >/dev/null 2>&1 || die "Required command not found: $1"
+}
+
+find_usb_dir() {
+    local base user_name dir name
+    user_name="${USER:-$(id -un)}"
+
+    if [[ -f "$FIXED_USB_DIR/unlock.pass" ]]; then
+        printf '%s\n' "$FIXED_USB_DIR"
+        return 0
+    fi
+    if [[ -f "$LEGACY_FIXED_USB_DIR/unlock.pass" ]]; then
+        printf '%s\n' "$LEGACY_FIXED_USB_DIR"
+        return 0
+    fi
+
+    for base in "/media/$user_name" "/run/media/$user_name"; do
+        [[ -d "$base" ]] || continue
+
+        for name in bastion bastion-ssh; do
+            while IFS= read -r -d '' dir; do
+                if [[ -f "$dir/unlock.pass" ]]; then
+                    printf '%s\n' "$dir"
+                    return 0
+                fi
+            done < <(find "$base" -mindepth 2 -maxdepth 2 -type d -name "$name" -print0 2>/dev/null)
+        done
+    done
+
+    return 1
+}
+
+usb_disk_paths() {
+    lsblk -pnro PATH,TYPE,TRAN | awk '$2=="disk" && $3=="usb" { print $1 }'
+}
+
+usb_partition_table() {
+    local disk
+
+    while read -r disk; do
+        [[ -n "$disk" ]] || continue
+        lsblk -pnro PATH,FSTYPE,TYPE "$disk" | awk '$3=="part" { print $1 "|" $2 }'
+    done < <(usb_disk_paths)
+}
+
+usb_partitions() {
+    usb_partition_table | cut -d'|' -f1
+}
+
+select_stage_parent() {
+    local user_tmp
+
+    if [[ -d /dev/shm && -w /dev/shm ]]; then
+        printf '%s\n' "/dev/shm"
+        return 0
+    fi
+
+    user_tmp="/run/user/$(id -u)"
+    if [[ -d "$user_tmp" && -w "$user_tmp" ]]; then
+        printf '%s\n' "$user_tmp"
+        return 0
+    fi
+
+    die "No writable in-memory filesystem is available for RAM staging."
+}
+
+make_stage_dir() {
+    local parent
+    parent="$(select_stage_parent)"
+    mktemp -d "$parent/usb-key-stage.XXXXXX"
+}
+
+find_source_dir() {
+    sudo /usr/local/bin/usb-unlock-on 2>/dev/null || true
+}
+
+find_source_partition() {
+    findmnt -n -o SOURCE "$UNLOCK_MOUNT" 2>/dev/null || true
+}
+
+verify_unlock_file() {
+    local unlock_file="$1"
+    local tmpkey
+
+    tmpkey="$(mktemp /tmp/usb-ssh-verify.XXXXXX)"
+    cleanup_verify() {
+        rm -f "$tmpkey"
+    }
+    trap cleanup_verify RETURN
+
+    openssl enc -d -aes-256-cbc -pbkdf2 -in "$ENC_KEY" -out "$tmpkey" -pass file:"$unlock_file" >/dev/null 2>&1
+    cmp -s <(ssh-keygen -y -f "$tmpkey") "$PUB_KEY"
+}
+
+wait_for_enter() {
+    local prompt="$1"
+    read -r -p "$prompt" _
+}
+
+wait_for_source() {
+    local source_dir
+
+    while true; do
+        source_dir="$(find_source_dir)"
+        if [[ -n "$source_dir" && -f "$source_dir/unlock.pass" ]]; then
+            if verify_unlock_file "$source_dir/unlock.pass"; then
+                printf '%s\n' "$source_dir"
+                return 0
+            fi
+            die "Detected unlock stick at $source_dir but its unlock.pass does not match the current encrypted bastion key."
+        fi
+
+        wait_for_enter "Insert the original bastion USB key, then press Enter to retry. "
+    done
+}
+
+ensure_no_extra_usb_partitions() {
+    local source_part="$1"
+    local extra
+
+    extra="$(usb_partitions | awk -v src="$source_part" '$0 != src')"
+    if [[ -n "$extra" ]]; then
+        printf 'Additional USB storage is already present besides the source key:\n%s\n' "$extra" >&2
+        die "Remove extra USB storage before running '$SELF_NAME copy'."
+    fi
+}
+
+wait_for_target_partition() {
+    local candidates found_count
+
+    while true; do
+        candidates="$(usb_partition_table)"
+        found_count="$(printf '%s\n' "$candidates" | sed '/^$/d' | wc -l)"
+
+        if [[ "$found_count" -eq 1 ]]; then
+            printf '%s\n' "$candidates"
+            return 0
+        fi
+
+        if [[ "$found_count" -gt 1 ]]; then
+            printf 'Multiple USB storage partitions are currently present:\n%s\n' "$candidates" >&2
+            die "Keep only one target USB storage device inserted during the single-port copy workflow."
+        fi
+
+        sleep 1
+    done
+}
+
+umount_partition_mounts() {
+    local dev="$1"
+    local target
+
+    while read -r target; do
+        [[ -n "$target" ]] || continue
+        sudo umount "$target"
+    done < <(findmnt -rn -S "$dev" -o TARGET 2>/dev/null || true)
+}
+
+prepare_target_mount() {
+    local dev="$1"
+    local fstype="$2"
+    local mount_type mount_opts fsck_status
+
+    sudo mkdir -p "$TARGET_MOUNT"
+    umount_partition_mounts "$dev"
+
+    if [[ "$fstype" == "vfat" ]]; then
+        set +e
+        sudo fsck.vfat -a "$dev"
+        fsck_status=$?
+        set -e
+        if [[ "$fsck_status" -ne 0 && "$fsck_status" -ne 1 ]]; then
+            die "fsck.vfat failed for $dev"
+        fi
+        mount_type="vfat"
+        mount_opts="rw,noatime,nosuid,nodev,noexec,uid=1000,gid=1000,fmask=0177,dmask=0077"
+    else
+        mount_type="${fstype:-auto}"
+        mount_opts="rw,noatime,nosuid,nodev,noexec"
+    fi
+
+    sudo mount -t "$mount_type" -o "$mount_opts" "$dev" "$TARGET_MOUNT"
+}
+
+unmount_target_mount() {
+    if findmnt -rn "$TARGET_MOUNT" >/dev/null 2>&1; then
+        sudo umount "$TARGET_MOUNT"
+    fi
+}
+
+copy_source_to_target() {
+    local source_dir="$1"
+    local target_dir="$TARGET_MOUNT/bastion"
+    local legacy_target_dir="$TARGET_MOUNT/bastion-ssh"
+    local backup_dir
+
+    if sudo test -e "$target_dir"; then
+        backup_dir="$TARGET_MOUNT/bastion.backup-$(date +%Y%m%d-%H%M%S)"
+        sudo mv "$target_dir" "$backup_dir"
+        note "Existing target bastion moved to $backup_dir"
+    fi
+    if sudo test -e "$legacy_target_dir"; then
+        backup_dir="$TARGET_MOUNT/bastion-ssh.backup-$(date +%Y%m%d-%H%M%S)"
+        sudo mv "$legacy_target_dir" "$backup_dir"
+        note "Existing legacy target bastion-ssh moved to $backup_dir"
+    fi
+
+    sudo mkdir -p "$target_dir"
+    sudo cp -a "$source_dir/." "$target_dir/"
+    sudo rm -rf "$TARGET_MOUNT/TerminalCity" "$TARGET_MOUNT/gway-tools"
+    printf '%s\n' \
+        "GWAY bastion USB key" \
+        "" \
+        "This key is for unlocking 001 locally when physically inserted into 001." \
+        "" \
+        "Use payload/ only for non-secret file transfer. Do not run tools from this key" \
+        "on laptops or other systems, and do not copy or print bastion/unlock.pass." |
+        sudo tee "$TARGET_MOUNT/README.txt" >/dev/null
+    sudo mkdir -p "$TARGET_MOUNT/payload"
+    if ! sudo test -e "$TARGET_MOUNT/payload/README.txt"; then
+        printf '%s\n' \
+            "GWAY USB payload area" \
+            "" \
+            "Use this folder for non-secret files copied off 001 or another computer where this key is connected." \
+            "Do not put unlock secrets, tokens, private keys, or plaintext credentials here." |
+            sudo tee "$TARGET_MOUNT/payload/README.txt" >/dev/null
+    fi
+    sudo sync
+
+    cmp -s "$source_dir/unlock.pass" "$target_dir/unlock.pass" || die "unlock.pass verification failed after copy."
+    cmp -s "$source_dir/jump-outbound.pub" "$target_dir/jump-outbound.pub" || die "jump-outbound.pub verification failed after copy."
+    sudo test -d "$TARGET_MOUNT/payload" || die "payload folder verification failed after copy."
+    verify_unlock_file "$target_dir/unlock.pass" || die "Copied unlock.pass does not unlock the bastion key."
+}
+
+remote_auth_disabled() {
+    printf '%s\n' \
+        "Remote bastion authorization is disabled." \
+        "Insert this Bastion USB on 001 and use local unlock only." >&2
+    return 64
+}
+
+stage_source_dir() {
+    local source_dir="$1"
+    local stage_dir="$2"
+
+    mkdir -p "$stage_dir"
+    cp -a "$source_dir/." "$stage_dir/"
+    cmp -s "$source_dir/unlock.pass" "$stage_dir/unlock.pass" || die "unlock.pass verification failed during RAM staging."
+    cmp -s "$source_dir/jump-outbound.pub" "$stage_dir/jump-outbound.pub" || die "jump-outbound.pub verification failed during RAM staging."
+    verify_unlock_file "$stage_dir/unlock.pass" || die "RAM-staged unlock.pass does not unlock the bastion key."
+}
+
+wait_for_no_usb_storage() {
+    local count
+
+    while true; do
+        count="$(usb_partitions | sed '/^$/d' | wc -l)"
+        if [[ "$count" -eq 0 ]]; then
+            return 0
+        fi
+        sleep 1
+    done
+}
+
+unlock_key_to_temp() {
+    local usb_dir unlock_file tmpkey
+
+    if [[ ! -f "$ENC_KEY" ]]; then
+        echo "Encrypted outbound key not found at $ENC_KEY" >&2
+        return 1
+    fi
+
+    if ! usb_dir="$(find_usb_dir)"; then
+        echo "Bastion unlock USB not found. Insert the USB containing bastion/unlock.pass." >&2
+        return 1
+    fi
+
+    unlock_file="$usb_dir/unlock.pass"
+    tmpkey="$(mktemp /tmp/usb-ssh-key.XXXXXX)"
+    umask 077
+    touch "$LOCAL_KNOWN_HOSTS"
+    chmod 600 "$LOCAL_KNOWN_HOSTS"
+
+    if ! openssl enc -d -aes-256-cbc -pbkdf2 -in "$ENC_KEY" -out "$tmpkey" -pass file:"$unlock_file" >/dev/null 2>&1; then
+        rm -f "$tmpkey"
+        echo "Failed to unlock the outbound SSH key with $unlock_file" >&2
+        return 1
+    fi
+
+    chmod 600 "$tmpkey"
+    printf '%s\n' "$tmpkey"
+}
+
+run_ssh() {
+    local tmpkey status
+
+    tmpkey="$(unlock_key_to_temp)"
+    status=0
+
+    cleanup() {
+        rm -f "$tmpkey"
+    }
+
+    trap cleanup EXIT INT TERM
+
+    if ! usb_ssh_has_remote_command "$@"; then
+        play_ssh_session_sound outbound "$(usb_ssh_target_detail "$@")"
+    fi
+
+    ssh \
+        -F "$CONFIG_FILE" \
+        -i "$tmpkey" \
+        -o BatchMode=yes \
+        -o ControlMaster=no \
+        -o ControlPath=none \
+        -o ForwardAgent=no \
+        -o ForwardX11=no \
+        -o IdentityAgent=none \
+        -o IdentitiesOnly=yes \
+        -o PreferredAuthentications=publickey \
+        -o UserKnownHostsFile="$LOCAL_KNOWN_HOSTS" \
+        "$@" || status=$?
+
+    trap - EXIT INT TERM
+    cleanup
+
+    return "$status"
+}
+
+usb_ssh_session_snapshot() {
+    ps -eo pid=,args= | awk -v known_hosts="$LOCAL_KNOWN_HOSTS" '
+        {
+            has_temp = 0
+            has_known_hosts = 0
+            has_identity_agent_none = 0
+            pid=$1
+            $1=""
+            sub(/^[[:space:]]+/, "", $0)
+
+            if ($0 !~ /(^|\/)ssh([[:space:]]|$)/) {
+                next
+            }
+
+            has_temp = index($0, "/tmp/usb-ssh-key.") > 0
+            has_known_hosts = index($0, "UserKnownHostsFile=" known_hosts) > 0
+            has_identity_agent_none = index($0, "IdentityAgent=none") > 0
+
+            if (!has_temp && !has_known_hosts && !has_identity_agent_none) {
+                next
+            }
+
+            print pid "\t" $0
+        }
+    '
+}
+
+print_active_sessions() {
+    local found=0 pid cmdline
+
+    while IFS=$'\t' read -r pid cmdline; do
+        [[ -n "$pid" ]] || continue
+
+        if [[ "$found" -eq 0 ]]; then
+            note "active usb-ssh sessions:"
+        fi
+
+        found=1
+        note "  pid=$pid $cmdline"
+    done < <(usb_ssh_session_snapshot)
+
+    if [[ "$found" -eq 0 ]]; then
+        note "active usb-ssh sessions: none detected"
+    fi
+}
+
+usb_ssh_target_detail() {
+    local arg
+
+    for arg in "$@"; do
+        case "$arg" in
+            -*) ;;
+            *)
+                printf '%s\n' "$arg"
+                return 0
+                ;;
+        esac
+    done
+
+    printf '%s\n' "no-target"
+}
+
+play_ssh_session_sound() {
+    local mode="${1:-outbound}"
+    local detail="${2:-}"
+
+    if [[ -x "$SSH_SESSION_SOUND_HOOK" ]]; then
+        "$SSH_SESSION_SOUND_HOOK" "$mode" "$detail" >/dev/null 2>&1 || true
+    fi
+}
+
+usb_ssh_has_remote_command() {
+    local arg target_seen=0 skip_next=0
+
+    for arg in "$@"; do
+        if [[ "$skip_next" -eq 1 ]]; then
+            skip_next=0
+            continue
+        fi
+
+        if [[ "$target_seen" -eq 1 ]]; then
+            return 0
+        fi
+
+        case "$arg" in
+            --)
+                target_seen=1
+                ;;
+            -b|-c|-D|-E|-e|-F|-I|-i|-J|-L|-l|-m|-O|-o|-p|-Q|-R|-S|-W|-w)
+                skip_next=1
+                ;;
+            -*)
+                ;;
+            *)
+                target_seen=1
+                ;;
+        esac
+    done
+
+    return 1
+}
+
+register_target() {
+    local target pubkey remote_user remote_host remote_home
+
+    if [[ $# -ne 1 ]]; then
+        echo "usage: $SELF_NAME register user@host" >&2
+        return 64
+    fi
+
+    target="$1"
+    remote_user="${target%@*}"
+    remote_host="${target#*@}"
+    remote_home="/home/$remote_user"
+
+    if [[ "$remote_user" == "$remote_host" ]]; then
+        echo "usage: $SELF_NAME register user@host" >&2
+        return 64
+    fi
+
+    if [[ ! -f "$PUB_KEY" ]]; then
+        echo "Public key not found at $PUB_KEY" >&2
+        return 1
+    fi
+
+    pubkey="$(cat "$PUB_KEY")"
+
+    cat <<EOF
+Manual registration for $target
+
+On the remote host, log in as the target user and run:
+
+install -d -m 700 ~/.ssh
+grep -qxF '$pubkey' ~/.ssh/authorized_keys 2>/dev/null || printf '%s\n' '$pubkey' >> ~/.ssh/authorized_keys
+chmod 600 ~/.ssh/authorized_keys
+
+If the remote host does not already trust this bastion, leave password login enabled there until this test succeeds.
+EOF
+
+    wait_for_enter "Press Enter when the remote host has been updated and is ready to test. "
+
+    echo "Testing key-based access to $target..."
+    if run_ssh -o ConnectTimeout=10 -o StrictHostKeyChecking=accept-new "$target" true; then
+        cat <<EOF
+Registration test succeeded.
+
+Next checks:
+  1. Run: $SELF_NAME $target
+  2. If you plan to disable passwords on the remote later, do it only after this keeps working.
+EOF
+        return 0
+    fi
+
+    cat <<EOF >&2
+Registration test failed.
+
+Check these items on the remote host:
+  1. The target user is correct for $target.
+  2. ~/.ssh exists with mode 700.
+  3. ~/.ssh/authorized_keys contains the bastion public key exactly once or more.
+  4. ~/.ssh/authorized_keys has mode 600.
+  5. The remote sshd still allows the target user to log in.
+
+After fixing those, rerun:
+  $SELF_NAME register $target
+
+Remote-side checks to run next:
+
+PUBKEY='$pubkey'
+getent passwd $remote_user
+sudo install -d -o $remote_user -g $remote_user -m 700 $remote_home/.ssh
+sudo touch $remote_home/.ssh/authorized_keys
+sudo chown $remote_user:$remote_user $remote_home/.ssh/authorized_keys
+sudo chmod 600 $remote_home/.ssh/authorized_keys
+sudo grep -qxF "\$PUBKEY" $remote_home/.ssh/authorized_keys || printf '%s\n' "\$PUBKEY" | sudo tee -a $remote_home/.ssh/authorized_keys >/dev/null
+sudo chmod go-w $remote_home
+sudo namei -l $remote_home/.ssh/authorized_keys
+sudo sshd -T | egrep 'pubkeyauthentication|authorizedkeysfile|authorizedkeyscommand|strictmodes|allowusers|denyusers'
+sudo journalctl -u ssh -n 50 --no-pager || sudo tail -n 50 /var/log/auth.log
+EOF
+    return 1
+}
+
+status_cmd() {
+    local source_part
+    local loaded_key agent_state dnsmasq_state pid cmdline
+
+    note "Bastion USB status"
+    note "------------------"
+    note "direct login mode: decrypts a temporary key from the inserted unlock USB when a new session starts"
+    note "existing SSH sessions continue after auth; the agent state below only affects future agent-backed checks"
+
+    source_part="$(find_source_partition)"
+    if [[ -n "$source_part" ]]; then
+        note "unlock mount: $source_part -> $UNLOCK_MOUNT"
+    else
+        note "unlock mount: not mounted"
+    fi
+
+    if [[ -S "$AGENT_SOCK" ]]; then
+        agent_state="present"
+    else
+        agent_state="missing"
+    fi
+    note "agent cache socket: $agent_state ($AGENT_SOCK)"
+
+    if SSH_AUTH_SOCK="$AGENT_SOCK" ssh-add -l >/tmp/usb-ssh-status.agent 2>/dev/null; then
+        loaded_key="$(cat /tmp/usb-ssh-status.agent)"
+    elif sudo -u "$OWNER_USER" env SSH_AUTH_SOCK="$AGENT_SOCK" ssh-add -l >/tmp/usb-ssh-status.agent 2>/dev/null; then
+        loaded_key="$(cat /tmp/usb-ssh-status.agent)"
+    else
+        loaded_key="no keys loaded or agent inaccessible"
+    fi
+    rm -f /tmp/usb-ssh-status.agent
+    note "cached agent keys: $loaded_key"
+
+    for iface in wlan0 wlan1 eth0; do
+        if [[ -d "/sys/class/net/$iface" ]]; then
+            note "$iface: $(cat "/sys/class/net/$iface/operstate") carrier=$(cat "/sys/class/net/$iface/carrier" 2>/dev/null || printf '?')"
+        else
+            note "$iface: missing"
+        fi
+    done
+
+    if [[ -r /run/nm-dnsmasq-wlan0.pid ]]; then
+        pid="$(cat /run/nm-dnsmasq-wlan0.pid 2>/dev/null || true)"
+    else
+        pid=""
+    fi
+
+    if [[ -n "$pid" && -r "/proc/$pid/cmdline" ]]; then
+        cmdline="$(tr '\0' ' ' < "/proc/$pid/cmdline")"
+    else
+        cmdline=""
+    fi
+
+    if [[ -n "$cmdline" && "$cmdline" == *"$AP_IP"* ]]; then
+        dnsmasq_state="running for $AP_IP"
+    else
+        dnsmasq_state="not detected for $AP_IP"
+    fi
+    note "wlan0 shared DHCP: $dnsmasq_state"
+
+    if [[ -f "$PUB_KEY" ]]; then
+        note "expected key: $(ssh-keygen -lf "$PUB_KEY")"
+    fi
+
+    print_active_sessions
+}
+
+sessions_cmd() {
+    note "USB SSH sessions"
+    note "----------------"
+    print_active_sessions
+}
+
+unlock_cmd() {
+    local source_dir
+    source_dir="$(sudo /usr/local/bin/usb-unlock-on)"
+    sudo systemctl start bastion-usb-refresh.service
+    note "unlock USB available at $source_dir"
+    note "direct usb-ssh logins still decrypt from the inserted unlock USB at launch; this only refreshes the optional agent cache"
+}
+
+lock_cmd() {
+    sudo -u "$OWNER_USER" env SSH_AUTH_SOCK="$AGENT_SOCK" ssh-add -D >/dev/null 2>&1 || true
+    rm -f "$REFRESH_HOLD" >/dev/null 2>&1 || true
+    sudo /usr/local/bin/usb-unlock-off || true
+    note "cached agent key cleared and unlock mount released"
+    note "existing SSH sessions are unaffected"
+    note "If the original unlock USB stays inserted, the automatic refresh service may load it again within about 10 seconds."
+}
+
+refresh_cmd() {
+    sudo systemctl start bastion-usb-refresh.service
+    note "agent cache refresh requested; direct usb-ssh logins still decrypt from the inserted unlock USB at launch"
+}
+
+copy_cmd() {
+    local source_dir source_part stage_root target_info target_part target_fstype
+
+    note "This workflow is local-only and does not require internet."
+    note "This version stages the bastion USB data into RAM so you can reuse the same external USB port."
+    note "If your current shell depends on eth0 or wlan1, removing the Wi-Fi dongle may drop that session."
+
+    sudo -v
+
+    source_dir="$(wait_for_source)"
+    source_part="$(find_source_partition)"
+    [[ -n "$source_part" ]] || die "Could not determine source unlock partition."
+
+    note "Source unlock key detected at $source_dir ($source_part)"
+    ensure_no_extra_usb_partitions "$source_part"
+
+    stage_root="$(make_stage_dir)"
+    copy_cleanup() {
+        unmount_target_mount
+        rm -rf "$stage_root"
+        sudo rm -f "$REFRESH_HOLD" >/dev/null 2>&1 || true
+        sudo systemctl start bastion-usb-refresh.service >/dev/null 2>&1 || true
+    }
+    trap copy_cleanup EXIT INT TERM
+
+    stage_source_dir "$source_dir" "$stage_root/bastion"
+    note "Source bastion folder staged in RAM at $stage_root"
+
+    sudo mkdir -p "$(dirname "$REFRESH_HOLD")"
+    sudo touch "$REFRESH_HOLD"
+    sudo /usr/local/bin/usb-unlock-off >/dev/null 2>&1 || true
+
+    note
+    note "Next step:"
+    note "1. Remove the original bastion USB key."
+    note "2. Keep the RAM-staged copy intact by leaving this command running."
+    wait_for_enter "Press Enter once the original bastion USB key has been removed. "
+
+    wait_for_no_usb_storage
+
+    note
+    note "Next step:"
+    note "1. Insert the target USB key in the same external USB port."
+    note "2. This key will receive a copy of bastion/."
+    wait_for_enter "Press Enter once the target USB key has been inserted. "
+
+    target_info="$(wait_for_target_partition)"
+    target_part="${target_info%%|*}"
+    target_fstype="${target_info#*|}"
+
+    note "Target USB partition detected: $target_part (${target_fstype:-unknown fs})"
+
+    prepare_target_mount "$target_part" "$target_fstype"
+    copy_source_to_target "$stage_root/bastion"
+    unmount_target_mount
+
+    rm -rf "$stage_root"
+    sudo rm -f "$REFRESH_HOLD"
+    sudo systemctl start bastion-usb-refresh.service >/dev/null 2>&1 || true
+    trap - EXIT INT TERM
+
+    note "Copy complete."
+    note "You can now remove the target USB key and reinsert the Wi-Fi dongle."
+}
+
+usage() {
+    cat <<EOF
+Usage:
+  $SELF_NAME --workgroup NAME register user@host
+  $SELF_NAME --workgroup NAME sessions
+  $SELF_NAME --workgroup NAME [ssh args]
+  $SELF_NAME register user@host
+  $SELF_NAME status
+  $SELF_NAME sessions
+  $SELF_NAME unlock
+  $SELF_NAME lock
+  $SELF_NAME refresh
+  $SELF_NAME copy
+  $SELF_NAME [ssh args]
+
+Commands:
+  register  Show manual remote registration steps for the current bastion public key,
+            then test key-based access after you complete them.
+  status    Show current bastion USB state, the optional bastion agent cache state,
+            and any active usb-ssh client sessions detected locally.
+  sessions  Show only the active usb-ssh client sessions detected locally.
+  unlock    Mount the original unlock USB and refresh the optional bastion agent cache.
+  lock      Clear the optional bastion agent cache and release the fixed unlock mount.
+  refresh   Re-run the optional bastion agent cache refresh once.
+  copy      Copy the current bastion USB unlock folder to another USB key.
+  help      Show this help.
+
+Options:
+  --workgroup NAME  Record NAME in /home/arthe/logs/usb-interactions.log for this invocation.
+
+Without one of the commands above, $SELF_NAME behaves like ssh by decrypting the bastion key
+from the inserted unlock USB into a temporary local key for that new connection.
+EOF
+}
+
+main() {
+    local action_status
+
+    need_cmd awk
+    need_cmd cmp
+    need_cmd cp
+    need_cmd cut
+    need_cmd find
+    need_cmd findmnt
+    need_cmd lsblk
+    need_cmd mktemp
+    need_cmd openssl
+    need_cmd ps
+    need_cmd sed
+    need_cmd ssh
+    need_cmd ssh-add
+    need_cmd ssh-keygen
+    need_cmd sudo
+    need_cmd tr
+    need_cmd wc
+
+    if [[ "${1:-}" == "--workgroup" ]]; then
+        shift
+        [[ $# -gt 0 ]] || return 64
+        export WORKGROUP_NAME="$1"
+        shift
+    fi
+
+    if [[ $# -eq 0 ]]; then
+        usage >&2
+        return 64
+    fi
+
+    case "$1" in
+        register)
+            USB_SSH_ACTION="register"
+            USB_SSH_DETAIL="${2:-missing-target}"
+            ;;
+        status)
+            USB_SSH_ACTION="status"
+            USB_SSH_DETAIL="local"
+            ;;
+        sessions)
+            USB_SSH_ACTION="sessions"
+            USB_SSH_DETAIL="local"
+            ;;
+        unlock)
+            USB_SSH_ACTION="unlock"
+            USB_SSH_DETAIL="agent-cache"
+            ;;
+        lock)
+            USB_SSH_ACTION="lock"
+            USB_SSH_DETAIL="agent-cache"
+            ;;
+        refresh)
+            USB_SSH_ACTION="refresh"
+            USB_SSH_DETAIL="agent-cache"
+            ;;
+        copy)
+            USB_SSH_ACTION="copy"
+            USB_SSH_DETAIL="usb-clone"
+            ;;
+        remote-challenge)
+            USB_SSH_ACTION="remote-challenge"
+            USB_SSH_DETAIL="disabled"
+            ;;
+        remote-accept)
+            USB_SSH_ACTION="remote-accept"
+            USB_SSH_DETAIL="disabled"
+            ;;
+        remote-status)
+            USB_SSH_ACTION="remote-status"
+            USB_SSH_DETAIL="disabled"
+            ;;
+        help|-h|--help)
+            USB_SSH_ACTION="help"
+            USB_SSH_DETAIL="usage"
+            ;;
+        *)
+            USB_SSH_ACTION="ssh"
+            USB_SSH_DETAIL="$(usb_ssh_target_detail "$@")"
+            ;;
+    esac
+
+    usb_ssh_log_start
+
+    case "$1" in
+        register)
+            shift
+            if register_target "$@"; then
+                return 0
+            else
+                action_status=$?
+                return "$action_status"
+            fi
+            ;;
+        status)
+            if status_cmd; then
+                return 0
+            else
+                action_status=$?
+                return "$action_status"
+            fi
+            ;;
+        sessions)
+            if sessions_cmd; then
+                return 0
+            else
+                action_status=$?
+                return "$action_status"
+            fi
+            ;;
+        unlock)
+            if unlock_cmd; then
+                return 0
+            else
+                action_status=$?
+                return "$action_status"
+            fi
+            ;;
+        lock)
+            if lock_cmd; then
+                return 0
+            else
+                action_status=$?
+                return "$action_status"
+            fi
+            ;;
+        refresh)
+            if refresh_cmd; then
+                return 0
+            else
+                action_status=$?
+                return "$action_status"
+            fi
+            ;;
+        copy)
+            if copy_cmd; then
+                return 0
+            else
+                action_status=$?
+                return "$action_status"
+            fi
+            ;;
+        remote-challenge)
+            remote_auth_disabled
+            return $?
+            ;;
+        remote-accept)
+            remote_auth_disabled
+            return $?
+            ;;
+        remote-status)
+            remote_auth_disabled
+            return $?
+            ;;
+        help|-h|--help)
+            usage
+            return 0
+            ;;
+        *)
+            if run_ssh "$@"; then
+                return 0
+            else
+                action_status=$?
+                return "$action_status"
+            fi
+            ;;
+    esac
+}
+
+if main "$@"; then
+    status=0
+else
+    status=$?
+fi
+usb_ssh_log_finish "$status"
+exit "$status"
