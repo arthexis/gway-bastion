@@ -3,11 +3,11 @@
 usb-ssh \- SSH through the bastion USB unlock key workflow
 .SH SYNOPSIS
 .B usb-ssh
-.RI [ --workgroup " NAME" ]
+.RI [ --operator " NAME" ]
 .I command
 .br
 .B usb-ssh
-.RI [ --workgroup " NAME" ]
+.RI [ --operator " NAME" ]
 .RI [ ssh-args ...]
 .SH DESCRIPTION
 .B usb-ssh
@@ -45,8 +45,8 @@ Copy the current bastion USB unlock folder to another USB key.
 Show usage.
 .SH OPTIONS
 .TP
-.BI --workgroup " NAME"
-Record the workgroup identity in
+.BI --operator " NAME"
+Record the operator identity in
 .IR /home/arthe/logs/usb-interactions.log .
 .SH EXAMPLES
 Show bastion USB status:
@@ -58,7 +58,7 @@ Show bastion USB status:
 Unlock and refresh the local agent cache:
 .PP
 .nf
-/home/arthe/.local/bin/usb-ssh --workgroup FieldOps unlock
+/home/arthe/.local/bin/usb-ssh --operator FieldOps unlock
 .fi
 .PP
 Use the wrapper as SSH:
@@ -81,7 +81,7 @@ Fixed unlock mount location.
 Optional bastion agent socket.
 .TP
 .I /home/arthe/logs/usb-interactions.log
-Workgroup-tagged interaction log.
+Operator-tagged interaction log.
 .SH SEE ALSO
 .BR ssh (1),
 .BR remote-up (1)

@@ -2,13 +2,13 @@
 set -euo pipefail
 
 source /home/arthe/.local/lib/usb-git/common.sh
-source /home/arthe/.local/lib/workgroup-log.sh
+source /home/arthe/.local/lib/operator-log.sh
 
 hook_detail="no-refs"
 hook_status=0
 readonly ZERO_SHA="0000000000000000000000000000000000000000"
 
-workgroup_log_event "usb-git-hook" "start" "pre-push" "$hook_detail"
+operator_log_event "usb-git-hook" "start" "pre-push" "$hook_detail"
 
 while read -r _local_ref _local_sha remote_ref _remote_sha; do
     hook_detail="${remote_ref:-no-refs}"
@@ -34,7 +34,7 @@ while read -r _local_ref _local_sha remote_ref _remote_sha; do
     if [[ "$require_bastion" -eq 1 ]]; then
         if ! usb_git_require_bastion; then
             hook_status=1
-            workgroup_log_event "usb-git-hook" "finish" "pre-push" "$hook_detail" "$hook_status"
+            operator_log_event "usb-git-hook" "finish" "pre-push" "$hook_detail" "$hook_status"
             printf 'Blocked action: %s requires the verified bastion USB key.\n' "$reason" >&2
             printf '%s\n' "Insert the key containing bastion/unlock.pass and retry the push." >&2
             exit 1
@@ -42,5 +42,5 @@ while read -r _local_ref _local_sha remote_ref _remote_sha; do
     fi
 done
 
-workgroup_log_event "usb-git-hook" "finish" "pre-push" "$hook_detail" "$hook_status"
+operator_log_event "usb-git-hook" "finish" "pre-push" "$hook_detail" "$hook_status"
 exit 0

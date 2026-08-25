@@ -2,7 +2,7 @@
 set -euo pipefail
 
 source /home/arthe/.local/lib/usb-git/common.sh
-source /home/arthe/.local/lib/workgroup-log.sh
+source /home/arthe/.local/lib/operator-log.sh
 
 readonly REAL_GH="/usr/bin/gh"
 readonly HOOK_TARGET="/home/arthe/.local/lib/usb-git/pre-push-main-guard.sh"
@@ -11,7 +11,7 @@ USB_GIT_DETAIL=""
 USB_GIT_LOGGED_FINISH=0
 
 usb_git_log_start() {
-    workgroup_log_event "usb-git" "start" "$USB_GIT_ACTION" "$USB_GIT_DETAIL"
+    operator_log_event "usb-git" "start" "$USB_GIT_ACTION" "$USB_GIT_DETAIL"
 }
 
 usb_git_log_finish() {
@@ -21,7 +21,7 @@ usb_git_log_finish() {
         return 0
     fi
 
-    workgroup_log_event "usb-git" "finish" "$USB_GIT_ACTION" "$USB_GIT_DETAIL" "$status"
+    operator_log_event "usb-git" "finish" "$USB_GIT_ACTION" "$USB_GIT_DETAIL" "$status"
     USB_GIT_LOGGED_FINISH=1
 }
 
@@ -297,7 +297,7 @@ usb_git_help() {
 usb-git mirrors usb-ssh for GitHub operations.
 
 Usage:
-  usb-git --workgroup NAME <gh arguments>
+  usb-git --operator NAME <gh arguments>
   usb-git bootstrap [--token-file PATH | --from-gh-auth]
   usb-git install-hooks [repo ...]
   usb-git <gh arguments>
@@ -306,15 +306,15 @@ Behavior:
   - Normal GitHub CLI reads can run without the USB key.
   - PR merges, repo admin changes, releases, secrets/variables, and mutating gh api calls require the USB key.
   - Direct git pushes to main, tags, deleted refs, and non-fast-forward updates require the USB key.
-  - Set WORKGROUP_NAME or pass --workgroup NAME to stamp the interaction log at /home/arthe/logs/usb-interactions.log.
-  - Direct git pushes read WORKGROUP_NAME from the environment because git itself does not route through usb-git.
+  - Set OPERATOR_NAME or pass --operator NAME to stamp the interaction log at /home/arthe/logs/usb-interactions.log.
+  - Direct git pushes read OPERATOR_NAME from the environment because git itself does not route through usb-git.
 EOF
 }
 
-if [[ "${1:-}" == "--workgroup" ]]; then
+if [[ "${1:-}" == "--operator" ]]; then
     shift
-    [[ $# -gt 0 ]] || usb_git_die "--workgroup requires a value"
-    export WORKGROUP_NAME="$1"
+    [[ $# -gt 0 ]] || usb_git_die "--operator requires a value"
+    export OPERATOR_NAME="$1"
     shift
 fi
 

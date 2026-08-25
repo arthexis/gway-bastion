@@ -3,7 +3,7 @@
 usb-git \- bastion-gated GitHub CLI wrapper for gway-001
 .SH SYNOPSIS
 .B usb-git
-[\fB--workgroup\fR \fINAME\fR] \fIgh-arguments\fR...
+[\fB--operator\fR \fINAME\fR] \fIgh-arguments\fR...
 .br
 .B usb-git
 \fBbootstrap\fR [\fB--token-file\fR \fIPATH\fR | \fB--from-gh-auth\fR]
@@ -20,7 +20,7 @@ release writes, secrets, variables, mutating
 .B gh api
 calls, and protected direct git pushes require the verified bastion USB key.
 .P
-The wrapper logs start and finish events to the local workgroup interaction log
+The wrapper logs start and finish events to the local operator interaction log
 and installs pre-push hooks that protect main, tags, deleted refs, and
 non-fast-forward updates.
 .SH COMMANDS

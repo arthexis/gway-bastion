@@ -16,7 +16,7 @@ readonly TARGET_MOUNT="/mnt/bastion-copy-target"
 readonly REFRESH_HOLD="/run/bastion-ssh/refresh.disabled"
 readonly AP_IP="10.42.0.1"
 readonly SSH_SESSION_SOUND_HOOK="/usr/local/libexec/gway-home-tools/ssh-session-sound"
-source /home/arthe/.local/lib/workgroup-log.sh
+source /home/arthe/.local/lib/operator-log.sh
 
 USB_SSH_ACTION="unknown"
 USB_SSH_DETAIL=""
@@ -27,7 +27,7 @@ note() {
 }
 
 usb_ssh_log_start() {
-    workgroup_log_event "$SELF_NAME" "start" "$USB_SSH_ACTION" "$USB_SSH_DETAIL"
+    operator_log_event "$SELF_NAME" "start" "$USB_SSH_ACTION" "$USB_SSH_DETAIL"
 }
 
 usb_ssh_log_finish() {
@@ -37,7 +37,7 @@ usb_ssh_log_finish() {
         return 0
     fi
 
-    workgroup_log_event "$SELF_NAME" "finish" "$USB_SSH_ACTION" "$USB_SSH_DETAIL" "$status"
+    operator_log_event "$SELF_NAME" "finish" "$USB_SSH_ACTION" "$USB_SSH_DETAIL" "$status"
     USB_SSH_LOGGED_FINISH=1
 }
 
@@ -724,9 +724,9 @@ copy_cmd() {
 usage() {
     cat <<EOF
 Usage:
-  $SELF_NAME --workgroup NAME register user@host
-  $SELF_NAME --workgroup NAME sessions
-  $SELF_NAME --workgroup NAME [ssh args]
+  $SELF_NAME --operator NAME register user@host
+  $SELF_NAME --operator NAME sessions
+  $SELF_NAME --operator NAME [ssh args]
   $SELF_NAME register user@host
   $SELF_NAME status
   $SELF_NAME sessions
@@ -749,7 +749,7 @@ Commands:
   help      Show this help.
 
 Options:
-  --workgroup NAME  Record NAME in /home/arthe/logs/usb-interactions.log for this invocation.
+  --operator NAME  Record NAME in /home/arthe/logs/usb-interactions.log for this invocation.
 
 Without one of the commands above, $SELF_NAME behaves like ssh by decrypting the bastion key
 from the inserted unlock USB into a temporary local key for that new connection.
@@ -777,10 +777,10 @@ main() {
     need_cmd tr
     need_cmd wc
 
-    if [[ "${1:-}" == "--workgroup" ]]; then
+    if [[ "${1:-}" == "--operator" ]]; then
         shift
         [[ $# -gt 0 ]] || return 64
-        export WORKGROUP_NAME="$1"
+        export OPERATOR_NAME="$1"
         shift
     fi
 
