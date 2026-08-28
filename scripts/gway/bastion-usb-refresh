@@ -10,6 +10,8 @@ readonly RUNDIR="/run/bastion-ssh"
 readonly HOLD_FILE="/run/bastion-ssh/refresh.disabled"
 readonly LOCKFILE="/run/lock/bastion-usb-refresh.lock"
 readonly ADMIN_EMAIL_SYNC="/home/arthe/.local/bin/gway-admin-email-sync"
+readonly PUB_KEY="/home/arthe/.ssh/jump-outbound.pub"
+readonly CLEANUP_USB_LAYOUT="${BASTION_USB_REFRESH_CLEANUP_LAYOUT:-0}"
 
 mkdir -p "$RUNDIR" "$(dirname "$LOCKFILE")"
 exec 9>"$LOCKFILE"
@@ -77,13 +79,38 @@ EOF
     fi
 }
 
+usb_layout_needs_cleanup() {
+    local bastion_dir="$1"
+    local usb_root
+
+    usb_root="$(dirname "$bastion_dir")"
+    [[ -d "$usb_root" ]] || return 1
+    [[ -e "$usb_root/gway-tools" || -e "$usb_root/TerminalCity" ]] && return 0
+    [[ -f "$usb_root/README.txt" ]] || return 0
+    [[ -d "$usb_root/payload" ]] || return 0
+    [[ -f "$usb_root/payload/README.txt" ]] || return 0
+    return 1
+}
+
+agent_has_expected_key() {
+    [[ -S "$AGENT_SOCK" && -r "$PUB_KEY" ]] || return 1
+    runuser -u "$USER_NAME" -- env SSH_AUTH_SOCK="$AGENT_SOCK" ssh-add -L 2>/dev/null \
+        | grep -Fxf "$PUB_KEY" >/dev/null 2>&1
+}
+
 usb_dir="$($MOUNT_HELPER 2>/dev/null || true)"
 
 if [[ -n "$usb_dir" && -f "$usb_dir/unlock.pass" ]]; then
-    cleanup_usb_layout "$usb_dir"
+    if [[ "$CLEANUP_USB_LAYOUT" == "1" ]] && usb_layout_needs_cleanup "$usb_dir"; then
+        cleanup_usb_layout "$usb_dir"
+    fi
 
     if [[ -x "$ADMIN_EMAIL_SYNC" && -f "$usb_dir/email/admin-email.toml" ]]; then
-        "$ADMIN_EMAIL_SYNC" --apply --quiet || true
+        "$ADMIN_EMAIL_SYNC" --service-prestart --quiet || true
+    fi
+
+    if agent_has_expected_key; then
+        exit 0
     fi
 
     tmpkey="$(mktemp "$RUNDIR/jump-outbound.XXXXXX")"

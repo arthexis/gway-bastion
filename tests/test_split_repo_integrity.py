@@ -44,3 +44,14 @@ def test_no_common_token_or_private_key_material_committed():
             continue
         text = path.read_text(encoding="utf-8", errors="ignore")
         assert not suspicious.search(text), str(path)
+
+
+def test_bastion_refresh_layout_cleanup_is_explicit():
+    helper = (ROOT / "scripts/gway/bastion-usb-refresh").read_text(encoding="utf-8")
+    docs = (ROOT / "docs/usb-inventory-and-bastion-unlock.md").read_text(encoding="utf-8")
+
+    assert "BASTION_USB_REFRESH_CLEANUP_LAYOUT" in helper
+    assert 'CLEANUP_USB_LAYOUT" == "1"' in helper
+    assert "--service-prestart --quiet" in helper
+    assert "--apply --quiet" not in helper
+    assert "BASTION_USB_REFRESH_CLEANUP_LAYOUT=1" in docs

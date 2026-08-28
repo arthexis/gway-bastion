@@ -6,6 +6,12 @@ GWAY uses host-local bastion helpers during rebuild and operation:
   `/mnt/bastion-unlock` when a valid bastion marker directory is found.
 - `bastion-key-present` verifies the mounted key by decrypting the local
   encrypted SSH key and comparing the derived public key.
+- `bastion-usb-refresh` normally treats an already-mounted key as read-only
+  verification input. It only rewrites the USB README/payload layout when
+  `BASTION_USB_REFRESH_CLEANUP_LAYOUT=1` is set for an explicit cleanup run.
+- Routine admin-email refresh uses `gway-admin-email-sync --service-prestart`,
+  which avoids remounting the USB read-write. Use the admin email helper's
+  `--apply` mode only when intentionally updating encrypted USB/local copies.
 - `usb-git` and the guarded `gh` wrapper require the verified key for
   destructive GitHub and protected-branch operations.
 
@@ -67,6 +73,9 @@ Expected mount behavior:
   `bastion-ssh/` marker directory on the USB.
 - It exits without changing state when `/run/bastion-ssh/refresh.disabled`
   exists.
+- Routine refresh should not remount the key read-write. Use
+  `BASTION_USB_REFRESH_CLEANUP_LAYOUT=1 sudo bastion-usb-refresh` only when the
+  USB layout itself needs repair.
 
 ## Safety Notes
 
