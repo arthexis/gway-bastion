@@ -27,6 +27,7 @@ USB inventory and claim matching live in `/home/arthe/gway-field-usb`.
 | `scripts/gway/bastion-key-present` | `/usr/local/libexec/bastion-key-present` |
 | `scripts/gway/bastion-require` | `/usr/local/libexec/bastion-require` |
 | `scripts/gway/bastion-usb-refresh` | `/usr/local/bin/bastion-usb-refresh` |
+| `scripts/gway/bastion-rfid-queue-sync` | `/usr/local/bin/bastion-rfid-queue-sync` |
 | `scripts/gway/usb-git/usb-git` | `/home/arthe/.local/bin/usb-git` |
 | `lib/usb-git/common.sh` | `/home/arthe/.local/lib/usb-git/common.sh` |
 | `lib/usb-git/pre-push-main-guard.sh` | `/home/arthe/.local/lib/usb-git/pre-push-main-guard.sh` |
@@ -47,8 +48,14 @@ install -m 0755 lib/usb-git/pre-push-main-guard.sh "$HOME/.local/lib/usb-git/pre
 sudo install -m 0755 scripts/gway/bastion-key-present /usr/local/libexec/bastion-key-present
 sudo install -m 0755 scripts/gway/bastion-require /usr/local/libexec/bastion-require
 sudo install -m 0755 scripts/gway/bastion-usb-refresh /usr/local/bin/bastion-usb-refresh
+sudo install -m 0755 scripts/gway/bastion-rfid-queue-sync /usr/local/bin/bastion-rfid-queue-sync
 sudo systemctl daemon-reload
 ```
+
+When the authoritative bastion-key status changes after baseline (insertion or
+removal), `bastion-usb-refresh.service` requests that the RFID worker clear
+pending cards. The periodic refresh timer does not clear the queue when status
+is unchanged, and an already-running card action is not terminated.
 
 ## Validation
 

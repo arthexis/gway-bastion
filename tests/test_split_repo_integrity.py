@@ -13,6 +13,7 @@ def test_bash_helpers_parse():
         ROOT / "scripts/gway/bastion-key-present",
         ROOT / "scripts/gway/bastion-require",
         ROOT / "scripts/gway/bastion-usb-refresh",
+        ROOT / "scripts/gway/bastion-rfid-queue-sync",
         ROOT / "scripts/gway/usb-git/common.sh",
         ROOT / "scripts/gway/usb-git/pre-push-main-guard.sh",
         ROOT / "scripts/gway/usb-git/usb-git",

@@ -6,6 +6,7 @@ After=bastion-ssh-agent.service
 [Service]
 Type=oneshot
 ExecStart=/usr/local/bin/bastion-usb-refresh
+ExecStartPost=/usr/local/bin/bastion-rfid-queue-sync
 
 [Install]
 WantedBy=multi-user.target
