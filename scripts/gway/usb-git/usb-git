@@ -94,27 +94,62 @@ usb_git_gh_is_privileged() {
     esac
 
     if [[ "$command" == "api" ]]; then
-        local expect_method=0
+        local api_endpoint=""
+        local graphql_query=""
+        local graphql_read_query_pattern='^[[:space:]]*(query([[:space:]]|\()|\{)'
+        local expect_value=""
         local method="GET"
         local api_index
 
         for ((api_index = index + 1; api_index < ${#args[@]}; api_index++)); do
             arg="${args[$api_index]}"
-            if [[ "$expect_method" -eq 1 ]]; then
-                method="${arg^^}"
-                expect_method=0
+            if [[ -n "$expect_value" ]]; then
+                case "$expect_value" in
+                    method)
+                        method="${arg^^}"
+                        ;;
+                    field)
+                        [[ "$arg" == query=* ]] && graphql_query="${arg#query=}"
+                        ;;
+                esac
+                expect_value=""
                 continue
             fi
 
             case "$arg" in
                 -X|--method)
-                    expect_method=1
+                    expect_value="method"
                     ;;
-                -f|--field|--raw-field|--input)
+                -f|-F|--field|--raw-field|--input)
                     method="POST"
+                    expect_value="field"
+                    ;;
+                -f=*|-F=*|--field=*|--raw-field=*)
+                    method="POST"
+                    [[ "${arg#*=}" == query=* ]] && graphql_query="${arg#*=query=}"
+                    ;;
+                --method=*)
+                    method="${arg#*=}"
+                    method="${method^^}"
+                    ;;
+                -* )
+                    ;;
+                *)
+                    [[ -z "$api_endpoint" ]] && api_endpoint="$arg"
                     ;;
             esac
         done
+
+        # GraphQL uses POST for reads. PR review replies and thread resolution
+        # are normal PR work; unrelated mutations keep the bastion guard.
+        if [[ "$api_endpoint" == "graphql" && "$method" == "POST" && -n "$graphql_query" ]]; then
+            if [[ "$graphql_query" =~ $graphql_read_query_pattern ]]; then
+                return 1
+            fi
+            if [[ "$graphql_query" == *"addPullRequestReviewThreadReply"* || "$graphql_query" == *"resolveReviewThread"* ]]; then
+                return 1
+            fi
+        fi
 
         case "$method" in
             GET|HEAD)

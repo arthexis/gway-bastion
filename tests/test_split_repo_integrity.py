@@ -31,6 +31,35 @@ def test_bash_helpers_parse():
         assert result.returncode == 0, f"{helper}: {result.stderr}"
 
 
+def test_gh_guard_allows_graphql_queries_but_not_mutations():
+    helper = ROOT / "scripts/gway/usb-git/usb-git"
+
+    def is_privileged(*args: str) -> bool:
+        command = (
+                'source <(sed "/^usb_git_install_hooks()/,$ d" "$1"); '
+            'usb_git_gh_is_privileged "${@:2}"'
+        )
+        result = subprocess.run(
+            ["bash", "-c", command, "bash", str(helper), *args],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        return result.returncode == 0
+
+    assert not is_privileged("api", "graphql", "-f", "query=query { viewer { login } }")
+    assert not is_privileged("api", "graphql", "-f", "query=query($owner: String!) { viewer { login } }")
+    assert not is_privileged("api", "graphql", "-f", "query={ viewer { login } }")
+    assert not is_privileged(
+        "api",
+        "graphql",
+        "-f",
+        "query=mutation { resolveReviewThread(input: {}) { thread { id } } }",
+    )
+    assert is_privileged("api", "graphql", "-f", "query=mutation { closeIssue(input: {}) { clientMutationId } }")
+    assert is_privileged("pr", "merge", "15")
+
+
 def test_no_common_token_or_private_key_material_committed():
     legacy_token = "".join(("g", "h", "p", "_"))
     fine_grained_token = "github" + "_pat_"
