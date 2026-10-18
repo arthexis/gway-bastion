@@ -12,8 +12,8 @@ GWAY uses host-local bastion helpers during rebuild and operation:
 - Routine admin-email refresh uses `gway-admin-email-sync --service-prestart`,
   which avoids remounting the USB read-write. Use the admin email helper's
   `--apply` mode only when intentionally updating encrypted USB/local copies.
-- `usb-git` and the guarded `gh` wrapper require the verified key for
-  destructive GitHub and protected-branch operations.
+- GitHub publication and branch policy are enforced by GitHub rulesets. The Pi
+  does not gate GitHub CLI calls or install local Git push guards.
 
 USB inventory and claim matching live in `/home/arthe/gway-field-usb`.
 
@@ -27,10 +27,6 @@ USB inventory and claim matching live in `/home/arthe/gway-field-usb`.
 | `scripts/gway/bastion-key-present` | `/usr/local/libexec/bastion-key-present` |
 | `scripts/gway/bastion-require` | `/usr/local/libexec/bastion-require` |
 | `scripts/gway/bastion-usb-refresh` | `/usr/local/bin/bastion-usb-refresh` |
-| `scripts/gway/bastion-rfid-queue-sync` | `/usr/local/bin/bastion-rfid-queue-sync` |
-| `scripts/gway/usb-git/usb-git` | `/home/arthe/.local/bin/usb-git` |
-| `lib/usb-git/common.sh` | `/home/arthe/.local/lib/usb-git/common.sh` |
-| `lib/usb-git/pre-push-main-guard.sh` | `/home/arthe/.local/lib/usb-git/pre-push-main-guard.sh` |
 
 ## Install
 
@@ -40,22 +36,30 @@ From the repository root:
 sudo install -d -m 0755 /usr/local/bin /usr/local/libexec /etc/systemd/system
 sudo install -m 0755 bin/usb-unlock-on /usr/local/bin/usb-unlock-on
 sudo install -m 0755 bin/usb-unlock-off /usr/local/bin/usb-unlock-off
-install -d -m 0755 "$HOME/.local/bin" "$HOME/.local/lib/usb-git"
 install -m 0755 bin/usb-ssh "$HOME/.local/bin/usb-ssh"
-install -m 0755 bin/usb-git "$HOME/.local/bin/usb-git"
-install -m 0755 lib/usb-git/common.sh "$HOME/.local/lib/usb-git/common.sh"
-install -m 0755 lib/usb-git/pre-push-main-guard.sh "$HOME/.local/lib/usb-git/pre-push-main-guard.sh"
 sudo install -m 0755 scripts/gway/bastion-key-present /usr/local/libexec/bastion-key-present
 sudo install -m 0755 scripts/gway/bastion-require /usr/local/libexec/bastion-require
 sudo install -m 0755 scripts/gway/bastion-usb-refresh /usr/local/bin/bastion-usb-refresh
-sudo install -m 0755 scripts/gway/bastion-rfid-queue-sync /usr/local/bin/bastion-rfid-queue-sync
 sudo systemctl daemon-reload
 ```
 
-When the authoritative bastion-key status changes after baseline (insertion or
-removal), `bastion-usb-refresh.service` requests that the RFID worker clear
-pending cards. The periodic refresh timer does not clear the queue when status
-is unchanged, and an already-running card action is not terminated.
+## Upgrade Cleanup
+
+The retired GitHub gate is not used by this release. On an existing host,
+remove only these exact legacy artifacts after installing the direct `gh`
+wrapper:
+
+```bash
+rm -f "$HOME/.local/bin/usb-git"
+rm -f "$HOME/.local/lib/usb-git/common.sh" "$HOME/.local/lib/usb-git/pre-push-main-guard.sh"
+rmdir "$HOME/.local/lib/usb-git" 2>/dev/null || true
+```
+
+Do not remove `usb-ssh`, `bastion-key-present`, or the Bastion SSH-agent
+services: they remain the supported access-control surface for Bastion SSH.
+
+USB removal does not run a Bastion refresh action or alter RFID work. The
+periodic refresh timer only maintains the optional Bastion agent cache.
 
 ## Validation
 

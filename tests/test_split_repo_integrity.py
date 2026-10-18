@@ -13,17 +13,10 @@ def test_bash_helpers_parse():
         ROOT / "scripts/gway/bastion-key-present",
         ROOT / "scripts/gway/bastion-require",
         ROOT / "scripts/gway/bastion-usb-refresh",
-        ROOT / "scripts/gway/bastion-rfid-queue-sync",
-        ROOT / "scripts/gway/usb-git/common.sh",
-        ROOT / "scripts/gway/usb-git/pre-push-main-guard.sh",
-        ROOT / "scripts/gway/usb-git/usb-git",
         ROOT / "bin/gh",
-        ROOT / "bin/usb-git",
         ROOT / "bin/usb-ssh",
         ROOT / "bin/usb-unlock-on",
         ROOT / "bin/usb-unlock-off",
-        ROOT / "lib/usb-git/common.sh",
-        ROOT / "lib/usb-git/pre-push-main-guard.sh",
     ]
 
     for helper in helpers:
@@ -31,33 +24,32 @@ def test_bash_helpers_parse():
         assert result.returncode == 0, f"{helper}: {result.stderr}"
 
 
-def test_gh_guard_allows_graphql_queries_but_not_mutations():
-    helper = ROOT / "scripts/gway/usb-git/usb-git"
+def test_gh_wrapper_delegates_directly_to_official_cli():
+    wrapper = (ROOT / "bin/gh").read_text(encoding="utf-8")
+    assert "exec /usr/bin/gh" in wrapper
+    assert "usb-git" not in wrapper
 
-    def is_privileged(*args: str) -> bool:
-        command = (
-                'source <(sed "/^usb_git_install_hooks()/,$ d" "$1"); '
-            'usb_git_gh_is_privileged "${@:2}"'
-        )
-        result = subprocess.run(
-            ["bash", "-c", command, "bash", str(helper), *args],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
-        return result.returncode == 0
 
-    assert not is_privileged("api", "graphql", "-f", "query=query { viewer { login } }")
-    assert not is_privileged("api", "graphql", "-f", "query=query($owner: String!) { viewer { login } }")
-    assert not is_privileged("api", "graphql", "-f", "query={ viewer { login } }")
-    assert not is_privileged(
-        "api",
-        "graphql",
-        "-f",
-        "query=mutation { resolveReviewThread(input: {}) { thread { id } } }",
-    )
-    assert is_privileged("api", "graphql", "-f", "query=mutation { closeIssue(input: {}) { clientMutationId } }")
-    assert is_privileged("pr", "merge", "15")
+def test_no_github_bastion_gate_surface_remains():
+    retired_paths = [
+        "bin/github-usb-bootstrap",
+        "bin/install-github-usb-main-guard",
+        "bin/usb-git",
+        "config/templates/usb-git.env.template",
+        "docs/man/man1/usb-git.1",
+        "lib/usb-git/common.sh",
+        "lib/usb-git/pre-push-main-guard.sh",
+        "scripts/gway/usb-git/common.sh",
+        "scripts/gway/usb-git/pre-push-main-guard.sh",
+        "scripts/gway/usb-git/usb-git",
+    ]
+
+    for relative_path in retired_paths:
+        assert not (ROOT / relative_path).exists(), relative_path
+
+    credential_rotate = (ROOT / "bin/github-credential-rotate").read_text(encoding="utf-8")
+    assert "usb-git" not in credential_rotate
+    assert "bastion" not in credential_rotate.lower()
 
 
 def test_no_common_token_or_private_key_material_committed():
