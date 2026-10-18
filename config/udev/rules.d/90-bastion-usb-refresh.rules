@@ -1,1 +1,1 @@
-ACTION=="add|remove", SUBSYSTEM=="block", ENV{ID_BUS}=="usb", RUN+="/usr/bin/systemctl --no-block start bastion-usb-refresh.service"
+ACTION=="add", SUBSYSTEM=="block", ENV{ID_BUS}=="usb", RUN+="/usr/bin/systemctl --no-block start bastion-usb-refresh.service"
