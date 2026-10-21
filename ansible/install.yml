@@ -1,0 +1,54 @@
+---
+- name: Stage Bastion release without activating it
+  hosts: localhost
+  connection: local
+  gather_facts: false
+  vars:
+    bastion_source_root: "{{ playbook_dir }}/.."
+  tasks:
+    - name: Validate requested revision and destination
+      ansible.builtin.assert:
+        that:
+          - bastion_revision is match('^[a-f0-9]{40}$')
+          - bastion_install_root is match('^/[A-Za-z0-9_. /-]+$')
+          - bastion_install_root not in ['/', '/etc', '/usr', '/home']
+        fail_msg: Unsafe Bastion staging parameters
+    - name: Create versioned release directory
+      ansible.builtin.file:
+        path: "{{ bastion_install_root }}/releases/{{ bastion_revision }}"
+        state: directory
+        mode: '0755'
+    - name: Create release scripts directory
+      ansible.builtin.file:
+        path: "{{ bastion_install_root }}/releases/{{ bastion_revision }}/scripts/gway"
+        state: directory
+        mode: '0755'
+    - name: Create release executable directory
+      ansible.builtin.file:
+        path: "{{ bastion_install_root }}/releases/{{ bastion_revision }}/bin"
+        state: directory
+        mode: '0755'
+    - name: Stage Bastion scripts (not installed into PATH)
+      ansible.builtin.copy:
+        src: "{{ bastion_source_root }}/scripts/gway/{{ item }}"
+        dest: "{{ bastion_install_root }}/releases/{{ bastion_revision }}/scripts/gway/{{ item }}"
+        mode: '0755'
+      loop:
+        - bastion-key-present
+        - bastion-require
+        - bastion-remote-auth
+        - bastion-token-repo
+        - bastion-usb-refresh
+    - name: Stage USB helpers (no service or mount changes)
+      ansible.builtin.copy:
+        src: "{{ bastion_source_root }}/bin/{{ item }}"
+        dest: "{{ bastion_install_root }}/releases/{{ bastion_revision }}/bin/{{ item }}"
+        mode: '0755'
+      loop:
+        - usb-unlock-on
+        - usb-unlock-off
+    - name: Write version evidence
+      ansible.builtin.copy:
+        dest: "{{ bastion_install_root }}/releases/{{ bastion_revision }}/REVISION"
+        content: "{{ bastion_revision }}\n"
+        mode: '0644'

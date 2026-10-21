@@ -1,0 +1,39 @@
+name: PR CI
+on:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install Ansible
+        run: python3 -m pip install --user 'ansible-core>=2.16,<2.20' pytest
+      - name: Verify shell syntax
+        run: |
+          bash -n deploy.sh scripts/gway/bastion-key-present scripts/gway/bastion-require scripts/gway/bastion-usb-refresh bin/usb-unlock-on bin/usb-unlock-off
+      - name: Run source tests
+        run: python3 -m pytest -q tests
+      - name: Stage twice in isolated path and compare
+        run: |
+          set -euo pipefail
+          export PATH="$HOME/.local/bin:$PATH"
+          export BASTION_INSTALL_ROOT="$RUNNER_TEMP/bastion-safe-install"
+          bash deploy.sh
+          git_sha="$(git rev-parse HEAD)"
+          test "$(cat "$BASTION_INSTALL_ROOT/releases/$git_sha/REVISION")" = "$git_sha"
+          initial="$(find "$BASTION_INSTALL_ROOT" -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum)"
+          bash deploy.sh
+          repeated="$(find "$BASTION_INSTALL_ROOT" -type f -print0 | sort -z | xargs -0 sha256sum | sha256sum)"
+          test "$initial" = "$repeated"
+          test ! -e "$BASTION_INSTALL_ROOT/current"
+          test ! -e "$BASTION_INSTALL_ROOT/active"
+      - name: Reject unsafe destinations
+        run: |
+          if BASTION_INSTALL_ROOT=/ bash deploy.sh; then
+            echo "unsafe root was accepted" >&2; exit 1
+          fi
