@@ -12,7 +12,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
       - name: Install Ansible
-        run: python3 -m pip install --user 'ansible-core>=2.16,<2.20'
+        run: python3 -m pip install --user 'ansible-core>=2.16,<2.20' pytest
       - name: Verify shell syntax
         run: |
           bash -n deploy.sh scripts/gway/bastion-key-present scripts/gway/bastion-require scripts/gway/bastion-usb-refresh bin/usb-unlock-on bin/usb-unlock-off
