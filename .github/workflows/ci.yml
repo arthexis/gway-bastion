@@ -32,6 +32,9 @@ jobs:
           test "$initial" = "$repeated"
           test ! -e "$BASTION_INSTALL_ROOT/current"
           test ! -e "$BASTION_INSTALL_ROOT/active"
+          test ! -e "$BASTION_INSTALL_ROOT/deployment/activated.json"
+          python3 deployment_status.py > "$RUNNER_TEMP/bastion-status.json"
+          python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); assert d["state"] == "staged" and d["runtime"] == "not_applicable" and d["staged_revision"] == sys.argv[2]' "$RUNNER_TEMP/bastion-status.json" "$git_sha"
       - name: Reject unsafe destinations
         run: |
           if BASTION_INSTALL_ROOT=/ bash deploy.sh; then
