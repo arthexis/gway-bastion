@@ -1,0 +1,41 @@
+#!/usr/bin/env bash
+# Best-effort PAM hook. It must never delay or reject an SSH login.
+set -u
+
+readonly sound_user="arthe"
+readonly sound_bin="/home/arthe/.local/bin/sound"
+readonly state_dir="/run/gway-ssh-session-sound"
+readonly cooldown_seconds=60
+
+[[ "${PAM_TYPE:-}" == "open_session" ]] || exit 0
+[[ "${PAM_SERVICE:-}" == "sshd" ]] || exit 0
+[[ -x "$sound_bin" ]] || exit 0
+command -v runuser >/dev/null 2>&1 || exit 0
+command -v flock >/dev/null 2>&1 || exit 0
+command -v nohup >/dev/null 2>&1 || exit 0
+
+umask 077
+mkdir -p "$state_dir" 2>/dev/null || exit 0
+
+{
+    flock -n 9 || exit 0
+    now="$(date +%s 2>/dev/null || printf '0')"
+    previous="$(cat "$state_dir/last-opened" 2>/dev/null || printf '0')"
+    [[ "$now" =~ ^[0-9]+$ && "$previous" =~ ^[0-9]+$ ]] || exit 0
+    (( now - previous >= cooldown_seconds )) || exit 0
+
+    # A minimal environment prevents PAM session values from reaching playback.
+    # nohup is backgrounded so pam_exec can return without waiting for audio.
+    nohup runuser -u "$sound_user" -- env -i \
+        HOME="/home/$sound_user" \
+        USER="$sound_user" \
+        LOGNAME="$sound_user" \
+        PATH=/usr/bin:/bin \
+        XDG_STATE_HOME="/home/$sound_user/.local/state" \
+        "$sound_bin" --event session-opened --source ssh \
+        </dev/null >/dev/null 2>&1 &
+    printf '%s\n' "$now" >"$state_dir/.last-opened.$$" 2>/dev/null \
+        && mv -f "$state_dir/.last-opened.$$" "$state_dir/last-opened" 2>/dev/null || true
+} 9>"$state_dir/lock"
+
+exit 0
