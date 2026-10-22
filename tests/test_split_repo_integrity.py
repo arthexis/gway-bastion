@@ -12,6 +12,7 @@ def test_bash_helpers_parse():
     helpers = [
         ROOT / "scripts/gway/bastion-key-present",
         ROOT / "scripts/gway/bastion-require",
+        ROOT / "scripts/gway/bastion-ssh-session-sound",
         ROOT / "scripts/gway/bastion-usb-refresh",
         ROOT / "bin/gh",
         ROOT / "bin/usb-ssh",
@@ -77,3 +78,18 @@ def test_bastion_refresh_layout_cleanup_is_explicit():
     assert "--service-prestart --quiet" in helper
     assert "--apply --quiet" not in helper
     assert "BASTION_USB_REFRESH_CLEANUP_LAYOUT=1" in docs
+
+
+def test_ssh_session_sound_hook_is_opt_in_and_non_blocking():
+    helper = (ROOT / "scripts/gway/bastion-ssh-session-sound").read_text(encoding="utf-8")
+    template = (ROOT / "config/pam.d/sshd-gway-session-sound.conf").read_text(encoding="utf-8")
+    docs = (ROOT / "docs/ssh-session-sound.md").read_text(encoding="utf-8")
+
+    assert 'PAM_TYPE:-' in helper
+    assert 'open_session' in helper
+    assert 'flock -n' in helper
+    assert 'nohup' in helper
+    assert '--event session-opened --source ssh' in helper
+    assert 'session optional pam_exec.so quiet type=open_session' in template
+    assert '/etc/pam.d/sshd' in docs
+    assert 'does not install or activate' in docs

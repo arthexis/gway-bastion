@@ -28,6 +28,11 @@
         path: "{{ bastion_install_root }}/releases/{{ bastion_revision }}/bin"
         state: directory
         mode: '0755'
+    - name: Create release PAM template directory
+      ansible.builtin.file:
+        path: "{{ bastion_install_root }}/releases/{{ bastion_revision }}/config/pam.d"
+        state: directory
+        mode: '0755'
     - name: Stage Bastion scripts (not installed into PATH)
       ansible.builtin.copy:
         src: "{{ bastion_source_root }}/scripts/gway/{{ item }}"
@@ -37,8 +42,14 @@
         - bastion-key-present
         - bastion-require
         - bastion-remote-auth
+        - bastion-ssh-session-sound
         - bastion-token-repo
         - bastion-usb-refresh
+    - name: Stage SSH session sound PAM template (not installed into PAM)
+      ansible.builtin.copy:
+        src: "{{ bastion_source_root }}/config/pam.d/sshd-gway-session-sound.conf"
+        dest: "{{ bastion_install_root }}/releases/{{ bastion_revision }}/config/pam.d/sshd-gway-session-sound.conf"
+        mode: '0644'
     - name: Stage USB helpers (no service or mount changes)
       ansible.builtin.copy:
         src: "{{ bastion_source_root }}/bin/{{ item }}"

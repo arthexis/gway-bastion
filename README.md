@@ -13,6 +13,8 @@ than this Pi, enforce repository publication policy.
   and USB refresh helpers.
 - `bin/`: installed command snapshots used on this host.
 - `config/systemd/gway/bastion/`: SSH agent and USB refresh units.
+- `config/pam.d/`: opt-in SSH PAM integration templates; they are staged but
+  never installed or activated by `deploy.sh`.
 - `config/udev/rules.d/`: redacted bastion USB refresh rule.
 - `docs/`: operations notes and man pages.
 - `tests/`: syntax and redaction checks.

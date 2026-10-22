@@ -4,6 +4,7 @@
 snapshot at `/opt/gway-bastion/releases/<commit SHA>`. This increment **does not
 activate** Bastion: it does not replace /usr/local commands, edit systemd or
 udev rules, touch USB media, keys, tokens or SSH agents, or restart anything.
+It also does not install PAM templates or modify SSH login behavior.
 
 Set `BASTION_INSTALL_ROOT` to an isolated absolute path for CI/tests. The default
 production location requires noninteractive privilege escalation through Ansible.
