@@ -63,3 +63,15 @@
         dest: "{{ bastion_install_root }}/releases/{{ bastion_revision }}/REVISION"
         content: "{{ bastion_revision }}\n"
         mode: '0644'
+
+    - name: Create deployment evidence directory
+      ansible.builtin.file:
+        path: "{{ bastion_install_root }}/deployment"
+        state: directory
+        mode: '0755'
+    - name: Write atomic staged-only release evidence
+      ansible.builtin.copy:
+        dest: "{{ bastion_install_root }}/deployment/staged.json"
+        content: "{{ {'schema': 1, 'revision': bastion_revision} | to_json }}\n"
+        mode: '0644'
+      # Deliberately never touches deployment/activated.json.
